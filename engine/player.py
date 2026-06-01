@@ -6,7 +6,7 @@ class Player:
     Represents the player entity in the game world.
     Currently rendered as a simple blue square for the grey-box prototype.
     """
-    def __init__(self, x: float, y: float, size: int = 40, speed: float = 300.0, color: tuple = (30, 144, 255)):
+    def __init__(self, x: float, y: float, size: int = 32, speed: float = 300.0, color: tuple = (30, 144, 255), shrink: int = 0):
         """
         Initializes the Player entity.
         
@@ -16,12 +16,14 @@ class Player:
             size: Width and height of the player square
             speed: Movement speed in pixels per second (delta-time scaled)
             color: RGB color tuple of the player square (default is a vibrant Dodger Blue)
+            shrink: Bounding box padding for tighter navigation (0 for perfect visual-physical match)
         """
         self.x = float(x)
         self.y = float(y)
         self.size = size
         self.speed = speed
         self.color = color
+        self.shrink = shrink
 
     def handle_input(self, keys: pygame.key.ScancodeWrapper, dt: float, screen_width: int, screen_height: int, map_grid: list = None):
         """
@@ -54,7 +56,7 @@ class Player:
             dx /= length
             dy /= length
             
-            shrink = 6
+            shrink = self.shrink
             tile_size = 40
             
             # 1. Apply horizontal speed and delta-time scaling
@@ -97,7 +99,7 @@ class Player:
         """
         Returns a slightly smaller bounding box to allow smooth navigation through tight corridors.
         """
-        shrink = 6 # Shrunk by 6px on each side for a 12px total breathing room
+        shrink = self.shrink
         return pygame.Rect(int(self.x) + shrink, int(self.y) + shrink, self.size - shrink * 2, self.size - shrink * 2)
 
     def check_wall_collisions(self, map_grid: list) -> bool:

@@ -3,6 +3,7 @@ import sys
 import random
 import json
 import os
+import math
 from engine.player import Player
 from engine.enemy import Enemy
 
@@ -141,15 +142,45 @@ class Game:
 
     def _knockback_player(self):
         """
-        Knocks the player back by 80 pixels to prevent immediate re-triggering of combat, ensuring no wall overlaps.
+        Knocks the player back by 80 pixels away from the enemy's position
+        to prevent immediate re-triggering of combat, ensuring no wall overlaps
+        and allowing sliding along obstacles.
         """
-        step = 10.0
-        for _ in range(8): # Knocks the player back by 80 pixels in 10px increments
-            self.player.x -= step
-            if self.player.x < 0 or (hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid)):
-                # Revert single step if it overlaps a boundary or a wall
-                self.player.x += step
-                break
+        # Calculate direction vector from enemy to player
+        dx = self.player.x - self.enemy.x
+        dy = self.player.y - self.enemy.y
+        
+        # Normalize the direction vector
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist > 0:
+            dx /= dist
+            dy /= dist
+        else:
+            # Fallback to left knockback if perfectly overlapping
+            dx = -1.0
+            dy = 0.0
+            
+        # Perform knockback in small steps to handle wall collisions smoothly
+        knockback_distance = 80.0
+        step_size = 5.0
+        steps = int(knockback_distance / step_size)
+        
+        for _ in range(steps):
+            # Try horizontal step
+            self.player.x += dx * step_size
+            self.player.clamp_to_screen(self.width, self.height)
+            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid):
+                # Collision: Revert horizontal step
+                self.player.x -= dx * step_size
+                
+            # Try vertical step
+            self.player.y += dy * step_size
+            self.player.clamp_to_screen(self.width, self.height)
+            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid):
+                # Collision: Revert vertical step
+                self.player.y -= dy * step_size
+                
+        self._save_game_state()
 
     def run(self):
         """
@@ -317,7 +348,7 @@ class Game:
             self.player.handle_input(keys, dt, self.width, self.height, self.map_grid)
             
             # Check collision with the static enemy
-            if self.player.get_rect().colliderect(self.enemy.get_rect()):
+            if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
                 self.state = 'combat_state'
                 print("Battle Started!")
                 
