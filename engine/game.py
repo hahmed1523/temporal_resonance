@@ -6,6 +6,7 @@ import os
 import math
 from engine.player import Player
 from engine.enemy import Enemy
+from engine.chest import Chest
 
 from engine.llm_handler import generate_llm_response
 from engine.level_maps import DEFAULT_MAP_GRID
@@ -49,14 +50,27 @@ class Game:
         # Initialize Game State
         self.state = 'exploration_state'  # States: 'exploration_state', 'combat_state'
         
-        # Initialize Game Entities
-        # Center the player in the middle of the screen
-        start_x = (self.width - 40) // 2
-        start_y = (self.height - 40) // 2
-        self.player = Player(start_x, start_y)
+        # World map boundaries (calculated dynamically based on 50x50 tiles)
+        self.tile_size = 40
+        self.world_width = len(self.map_grid[0]) * self.tile_size
+        self.world_height = len(self.map_grid) * self.tile_size
         
-        # Create a static enemy aligned with the grid
-        self.enemy = Enemy(520, 280)
+        # Camera Offset coordinates
+        self.camera_x = 0.0
+        self.camera_y = 0.0
+        
+        # Initialize Game Entities in the middle of the 50x50 world space
+        # Tile row 26, col 24 is (960, 1040)
+        self.player = Player(960, 1040)
+        
+        # Static enemy at tile row 26, col 28
+        self.enemy = Enemy(1120, 1040)
+        
+        # Golden Chest at tile row 26, col 20
+        self.chest = Chest(800, 1040)
+        
+        # Trigger initial camera centering
+        self._update_camera()
         
         # Combat Coordinates & Positions
         self.player_combat_pos = (150, 150)
@@ -108,6 +122,7 @@ class Game:
                     self.enemy_hp = data.get("enemy_hp", 100)
                     self.saif_respect = data.get("saif_respect", 50)
                     self.saif_hp = data.get("saif_hp", 100)
+                    self.chest_opened = data.get("chest_opened", False)
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -122,6 +137,7 @@ class Game:
         self.enemy_hp = 100
         self.saif_respect = 50
         self.saif_hp = 100
+        self.chest_opened = False
         self._save_game_state()
 
     def _save_game_state(self):
@@ -132,7 +148,8 @@ class Game:
             "player_hp": self.player_hp,
             "enemy_hp": self.enemy_hp,
             "saif_respect": self.saif_respect,
-            "saif_hp": self.saif_hp
+            "saif_hp": self.saif_hp,
+            "chest_opened": self.chest_opened
         }
         try:
             with open(self.state_file_path, 'w') as f:
@@ -168,14 +185,14 @@ class Game:
         for _ in range(steps):
             # Try horizontal step
             self.player.x += dx * step_size
-            self.player.clamp_to_screen(self.width, self.height)
+            self.player.clamp_to_screen(self.world_width, self.world_height)
             if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid):
                 # Collision: Revert horizontal step
                 self.player.x -= dx * step_size
                 
             # Try vertical step
             self.player.y += dy * step_size
-            self.player.clamp_to_screen(self.width, self.height)
+            self.player.clamp_to_screen(self.world_width, self.world_height)
             if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid):
                 # Collision: Revert vertical step
                 self.player.y -= dy * step_size
@@ -335,6 +352,21 @@ class Game:
                                     self.parry_success = False
                                     print("Player took damage!")
 
+    def _update_camera(self):
+        """
+        Updates the camera offset so the player remains centered on the screen,
+        clamping to the world bounds to prevent scrolling out of the map boundaries.
+        """
+        player_center_x = self.player.x + self.player.size // 2
+        player_center_y = self.player.y + self.player.size // 2
+        
+        self.camera_x = player_center_x - self.width // 2
+        self.camera_y = player_center_y - self.height // 2
+        
+        # Clamp camera to world map bounds
+        self.camera_x = max(0, min(self.camera_x, self.world_width - self.width))
+        self.camera_y = max(0, min(self.camera_y, self.world_height - self.height))
+
     def _update(self, dt: float):
         """
         Updates the state of all active game entities.
@@ -345,12 +377,22 @@ class Game:
             keys = pygame.key.get_pressed()
             
             # Update the player entity using the key states, delta time, and level map
-            self.player.handle_input(keys, dt, self.width, self.height, self.map_grid)
+            self.player.handle_input(keys, dt, self.world_width, self.world_height, self.map_grid)
             
             # Check collision with the static enemy
             if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
                 self.state = 'combat_state'
                 print("Battle Started!")
+                
+            # Check collision with the golden chest
+            if self.player.get_collision_rect().colliderect(self.chest.get_rect()):
+                if not self.chest_opened:
+                    self.chest_opened = True
+                    self._save_game_state()
+                    print("Chest Opened! Found ancient temporal essence!")
+                    
+            # Keep camera centered on player
+            self._update_camera()
                 
         # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
@@ -436,24 +478,37 @@ class Game:
         self.screen.fill(self.bg_color)
         
         if self.state == 'exploration_state':
-            # Render solid grey walls from map grid first
+            # Render solid grey walls from map grid first with frustum culling
             if hasattr(self, 'map_grid') and self.map_grid:
                 tile_size = 40
                 wall_color = (60, 60, 68)      # Modern slate grey
                 border_color = (48, 48, 54)    # Darker grey for tile borders
-                for r_idx, row in enumerate(self.map_grid):
-                    for c_idx, cell in enumerate(row):
+                
+                # Frustum culling: calculate visible range of tiles
+                start_col = max(0, int(self.camera_x // tile_size))
+                end_col = min(len(self.map_grid[0]), int((self.camera_x + self.width) // tile_size) + 1)
+                
+                start_row = max(0, int(self.camera_y // tile_size))
+                end_row = min(len(self.map_grid), int((self.camera_y + self.height) // tile_size) + 1)
+                
+                for r_idx in range(start_row, end_row):
+                    for c_idx in range(start_col, end_col):
+                        cell = self.map_grid[r_idx][c_idx]
                         if cell == 1:
-                            wall_rect = pygame.Rect(c_idx * tile_size, r_idx * tile_size, tile_size, tile_size)
+                            # Apply camera offset to wall drawing
+                            screen_x = c_idx * tile_size - self.camera_x
+                            screen_y = r_idx * tile_size - self.camera_y
+                            wall_rect = pygame.Rect(screen_x, screen_y, tile_size, tile_size)
                             pygame.draw.rect(self.screen, wall_color, wall_rect)
                             pygame.draw.rect(self.screen, border_color, wall_rect, 1)
                             
-            # Draw a modern, subtle grid for a professional "grey-box" prototype look
+            # Draw a modern, subtle grid relative to camera offsets for smooth shifting movement
             self._draw_prototype_grid()
             
-            # Render game entities
-            self.enemy.draw(self.screen)
-            self.player.draw(self.screen)
+            # Render game entities with camera offsets
+            self.enemy.draw(self.screen, self.camera_x, self.camera_y)
+            self.chest.draw(self.screen, self.camera_x, self.camera_y)
+            self.player.draw(self.screen, self.camera_x, self.camera_y)
             
         elif self.state == 'camp_state':
             # Draw a sleek camp screen UI
@@ -609,11 +664,15 @@ class Game:
 
     def _draw_prototype_grid(self):
         """
-        Draws a subtle 40x40 pixel grid to give context for movement and placement.
+        Draws a subtle 40x40 pixel grid relative to the camera offset
+        to give the perfect illusion of an infinite, shifting layout.
         Refined with thin, low-contrast lines to look sleek and modern.
         """
         grid_size = 40
-        for x in range(0, self.width, grid_size):
+        start_x = -int(self.camera_x % grid_size)
+        start_y = -int(self.camera_y % grid_size)
+        
+        for x in range(start_x, self.width, grid_size):
             pygame.draw.line(self.screen, self.grid_color, (x, 0), (x, self.height), 1)
-        for y in range(0, self.height, grid_size):
+        for y in range(start_y, self.height, grid_size):
             pygame.draw.line(self.screen, self.grid_color, (0, y), (self.width, y), 1)

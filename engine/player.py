@@ -143,9 +143,11 @@ class Player:
         """
         return pygame.Rect(int(self.x), int(self.y), self.size, self.size)
 
-    def draw(self, surface: pygame.Surface):
+    def draw(self, surface: pygame.Surface, camera_x: float = 0, camera_y: float = 0):
         """
-        Draws the player square onto the specified Pygame surface.
+        Draws the player square onto the specified Pygame surface relative to camera offsets.
         """
-        player_rect = self.get_rect()
+        screen_x = int(self.x - camera_x)
+        screen_y = int(self.y - camera_y)
+        player_rect = pygame.Rect(screen_x, screen_y, self.size, self.size)
         pygame.draw.rect(surface, self.color, player_rect)
