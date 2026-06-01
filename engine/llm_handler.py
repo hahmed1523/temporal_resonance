@@ -2,7 +2,6 @@ import urllib.request
 import urllib.error
 import json
 import os
-import random
 import re
 
 def scrub_json_response(raw_text: str) -> dict:

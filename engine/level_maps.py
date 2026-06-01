@@ -1,8 +1,17 @@
 """
 Level Maps for Temporal Resonance.
-Defines level grids where 1 = Solid Wall and 0 = Walkable Floor.
-World scale is 50x50 grid (each cell is 40x40 pixels, total size is 2000x2000).
+
+Tile Legend:
+  0 = Walkable Floor
+  1 = Solid Wall
+  2 = Chest (interactable, cleared to 0 on pickup)
+  3 = Saif NPC (solid until recruited)
+
+World scale is 50x50 grid (each cell is 40x40 pixels, total world size is 2000x2000).
 """
+
+# Shared constant — the pixel size of each map tile. Import this instead of hardcoding 40.
+TILE_SIZE = 40
 
 DEFAULT_MAP_GRID = [
     # Row 0 - 9

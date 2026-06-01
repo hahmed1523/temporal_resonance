@@ -9,7 +9,7 @@ from engine.enemy import Enemy
 from engine.chest import Chest
 
 from engine.llm_handler import generate_llm_response
-from engine.level_maps import DEFAULT_MAP_GRID
+from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE
 
 class Game:
     """
@@ -50,8 +50,8 @@ class Game:
         # Initialize Game State
         self.state = 'exploration_state'  # States: 'exploration_state', 'combat_state'
         
-        # World map boundaries (calculated dynamically based on 50x50 tiles)
-        self.tile_size = 40
+        # World map boundaries (grid is 50 rows × 50 cols, each tile is 40×40 px)
+        self.tile_size = TILE_SIZE
         self.world_width = len(self.map_grid[0]) * self.tile_size
         self.world_height = len(self.map_grid) * self.tile_size
         
@@ -66,8 +66,8 @@ class Game:
         # Static enemy at tile row 26, col 28
         self.enemy = Enemy(1120, 1040)
         
-        # Golden Chest at tile row 26, col 20
-        self.chest = Chest(800, 1040)
+        # Golden Chest — position derived from grid scan below
+        self.chest = None
         
         # Scan grid to find Saif NPC tile 3
         self.saif_npc_x = None
@@ -78,8 +78,10 @@ class Game:
                     self.saif_npc_x = c_idx * self.tile_size
                     self.saif_npc_y = r_idx * self.tile_size
                     break
+            if self.saif_npc_x is not None:
+                break
                     
-        # Scan grid to find Chest tile 2
+        # Scan grid to find Chest tile 2 and create Chest entity at that position
         self.chest_x = None
         self.chest_y = None
         for r_idx, row in enumerate(self.map_grid):
@@ -88,6 +90,10 @@ class Game:
                     self.chest_x = c_idx * self.tile_size
                     self.chest_y = r_idx * self.tile_size
                     break
+            if self.chest_x is not None:
+                break
+        if self.chest_x is not None:
+            self.chest = Chest(self.chest_x, self.chest_y)
         
         # Trigger initial camera centering
         self._update_camera()
@@ -153,6 +159,78 @@ class Game:
         self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
         self.enemy_attack_active = False
         self._save_game_state()
+
+    def _start_enemy_turn(self):
+        """
+        Transitions to the enemy's attack turn with randomized timing and target.
+        Consolidates the duplicated enemy-turn-setup logic used across combat actions.
+        """
+        self.combat_turn = 'enemy'
+        self.enemy_attack_active = True
+        self.enemy_attack_start_time = pygame.time.get_ticks()
+        self.parry_attempted = False
+        self.parry_success = False
+
+        # Randomly pick target: 'player' or 'saif' (only if recruited)
+        if self.saif_recruited:
+            self.enemy_target = random.choice(['player', 'saif'])
+        else:
+            self.enemy_target = 'player'
+
+        target_y = (self.player_combat_pos[1] if self.enemy_target == 'player'
+                    else self.saif_combat_pos[1])
+        self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
+
+        # Randomize forward attack lunge duration (300ms to 750ms)
+        self.forward_duration = random.randint(300, 750)
+        self.total_duration = self.forward_duration * 2
+
+        # Scale parry window centered on impact
+        self.parry_window_start = self.forward_duration - 100
+        self.parry_window_end = self.forward_duration + 20
+
+        print(f"[Debug System] Enemy targets: {self.enemy_target.upper()}. "
+              f"Attack Speed Picked: {self.forward_duration}ms. "
+              f"Parry range: {self.parry_window_start} - {self.parry_window_end}")
+
+    def _process_chat_input(self, in_combat: bool):
+        """
+        Handles the shared chat submission logic for both overworld dialogue
+        and combat Talk mode: queries LLM, applies respect, updates history,
+        and transitions to the response display state.
+        """
+        if not self.chat_input_text.strip():
+            return
+
+        game_state = {
+            "player_hp": self.player_hp,
+            "enemy_hp": self.enemy_hp,
+            "saif_respect": self.saif_respect,
+            "saif_hp": self.saif_hp,
+            "chat_history": self.chat_history,
+            "in_combat": in_combat,
+            "llm_provider": self.llm_provider,
+            "ollama_model": self.ollama_model,
+            "ollama_url": self.ollama_url
+        }
+        res_dict = generate_llm_response(self.chat_input_text, game_state)
+        dialogue = res_dict.get("dialogue", "Saif remains silent.")
+        change = res_dict.get("respect_change", 0)
+
+        # Apply respect change
+        self._adjust_respect(change)
+
+        # Append exchange to rolling chat history and limit to most recent 3
+        self.chat_history.append([self.chat_input_text, dialogue])
+        if len(self.chat_history) > 3:
+            self.chat_history.pop(0)
+
+        self._save_game_state()
+        print(f"\n[Debug Memory] Current chat_history: {self.chat_history}\n")
+
+        self.talk_response_text = dialogue
+        self.talk_response_start_time = pygame.time.get_ticks()
+        self.combat_mode = 'talk_response'
 
     def _load_game_state(self):
         """
@@ -271,14 +349,14 @@ class Game:
             # Try horizontal step
             self.player.x += dx * step_size
             self.player.clamp_to_screen(self.world_width, self.world_height)
-            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid, self.saif_recruited):
+            if self.player.check_wall_collisions(self.map_grid, self.saif_recruited):
                 # Collision: Revert horizontal step
                 self.player.x -= dx * step_size
                 
             # Try vertical step
             self.player.y += dy * step_size
             self.player.clamp_to_screen(self.world_width, self.world_height)
-            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid, self.saif_recruited):
+            if self.player.check_wall_collisions(self.map_grid, self.saif_recruited):
                 # Collision: Revert vertical step
                 self.player.y -= dy * step_size
                 
@@ -309,326 +387,224 @@ class Game:
 
     def _handle_events(self):
         """
-        Processes standard game loop events such as window closing or ESC key pressing.
+        Processes Pygame events and dispatches KEYDOWN events
+        to the appropriate state-specific handler.
         """
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.is_running = False
             elif event.type == pygame.KEYDOWN:
-                # Camp State Controls
                 if self.state == 'camp_state':
-                    if event.key == pygame.K_ESCAPE:
-                        self.state = 'exploration_state'
-                    elif event.key == pygame.K_r:
-                        self.player_hp = 100
-                        self.saif_hp = 100
-                        self.rest_notification_active = True
-                        self._save_game_state()
-                        print("Party Rested!")
-                
-                # Exploration State Controls
+                    self._handle_camp_events(event)
                 elif self.state == 'exploration_state':
-                    if event.key == pygame.K_ESCAPE:
-                        self.is_running = False
-                    elif event.key == pygame.K_c:
-                        self.state = 'camp_state'
-                        self.rest_notification_active = False
-                        self._load_game_state()
-                    elif event.key == pygame.K_e:
-                        # 1. Check adjacency to Saif NPC in world space (adjacent is <= 45px distance)
-                        if not self.saif_recruited and self.saif_npc_x is not None:
-                            dist_x = abs(self.player.x - self.saif_npc_x)
-                            dist_y = abs(self.player.y - self.saif_npc_y)
-                            if dist_x <= 45 and dist_y <= 45:
-                                self.state = 'dialogue_state'
-                                self.combat_mode = 'talk_input'
-                                self.chat_input_text = ""
-                                self.talk_response_text = ""
-                                print("[System] Entered overworld dialogue with Saif.")
-                                
-                        # 2. Check adjacency to Chest (tile 2) in world space (adjacent is <= 45px distance)
-                        if self.chest_x is not None:
-                            c_idx = int(self.chest_x // self.tile_size)
-                            r_idx = int(self.chest_y // self.tile_size)
-                            if self.map_grid[r_idx][c_idx] == 2:
-                                dist_x = abs(self.player.x - self.chest_x)
-                                dist_y = abs(self.player.y - self.chest_y)
-                                if dist_x <= 45 and dist_y <= 45:
-                                    # Clear map cell from 2 to 0
-                                    self.map_grid[r_idx][c_idx] = 0
-                                    self.chest_opened = True
-                                    # Increment health_potion in inventory
-                                    self.inventory["health_potion"] = self.inventory.get("health_potion", 0) + 1
-                                    self._save_game_state()
-                                    print("Found a Health Potion!")
-                
-                # Peaceful Overworld Dialogue Controls
+                    self._handle_exploration_events(event)
                 elif self.state == 'dialogue_state':
-                    if event.key == pygame.K_ESCAPE:
-                        self.state = 'exploration_state'
-                        self.combat_mode = 'menu'
-                        print("[System] Left dialogue early.")
-                    elif self.combat_mode == 'talk_input':
-                        if event.key == pygame.K_BACKSPACE:
-                            self.chat_input_text = self.chat_input_text[:-1]
-                        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                            if self.chat_input_text.strip():
-                                # Construct context-aware peaceful game state
-                                game_state = {
-                                    "player_hp": self.player_hp,
-                                    "enemy_hp": self.enemy_hp,
-                                    "saif_respect": self.saif_respect,
-                                    "saif_hp": self.saif_hp,
-                                    "chat_history": self.chat_history,
-                                    "in_combat": False,
-                                    "llm_provider": self.llm_provider,
-                                    "ollama_model": self.ollama_model,
-                                    "ollama_url": self.ollama_url
-                                }
-                                res_dict = generate_llm_response(self.chat_input_text, game_state)
-                                dialogue = res_dict.get("dialogue", "Saif remains silent.")
-                                change = res_dict.get("respect_change", 0)
-                                
-                                # Apply respect change
-                                self._adjust_respect(change)
-                                
-                                # Append to memory and prune to last 3
-                                self.chat_history.append([self.chat_input_text, dialogue])
-                                if len(self.chat_history) > 3:
-                                    self.chat_history.pop(0)
-                                    
-                                self._save_game_state()
-                                print(f"\n[Debug Memory] Current chat_history: {self.chat_history}\n")
-                                
-                                self.talk_response_text = dialogue
-                                self.talk_response_start_time = pygame.time.get_ticks()
-                                self.combat_mode = 'talk_response'
-                        else:
-                            # Append keyboard inputs
-                            if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 60:
-                                self.chat_input_text += event.unicode
-                
-                # Combat State Controls
+                    self._handle_dialogue_events(event)
                 elif self.state == 'combat_state':
-                    if event.key == pygame.K_ESCAPE and self.combat_mode == 'menu':
-                        self.is_running = False
-                    if self.combat_turn == 'player':
-                        if self.combat_mode == 'menu':
-                            # Cycle options with Up / Down arrows
-                            if event.key == pygame.K_UP:
-                                self.menu_index = (self.menu_index - 1) % len(self.menu_options)
-                            elif event.key == pygame.K_DOWN:
-                                self.menu_index = (self.menu_index + 1) % len(self.menu_options)
-                            
-                            # Enter key triggers option select
-                            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                                selected_option = self.menu_options[self.menu_index]
-                                
-                                if selected_option == 'Attack':
-                                    base_dmg = 20
-                                    saif_dmg = 0
-                                    
-                                    # Coordinated attack from Saif if recruited
-                                    if self.saif_recruited:
-                                        if self.saif_respect < 50:
-                                            # 50% chance of disobedience/defiance
-                                            if random.random() < 0.5:
-                                                print("[Defiant] Saif refuses your coordinate command and stands idle!")
-                                            else:
-                                                print("[Combat] Saif executes a reluctant support strike! (+10 DMG)")
-                                                saif_dmg = 10
-                                        else:
-                                            print("[Combat] Saif executes a coordinated support strike! (+10 DMG)")
-                                            saif_dmg = 10
-                                            
-                                    total_dmg = base_dmg + saif_dmg
-                                    self.enemy_hp = max(0, self.enemy_hp - total_dmg)
-                                    self._save_game_state()
-                                    print(f"Attack executed! Total damage: {total_dmg}. Enemy HP: {self.enemy_hp}")
-                                    
-                                    # Check if enemy defeated
-                                    if self.enemy_hp <= 0:
-                                        print("Battle Over! Victory achieved.")
-                                        self._reset_combat_only_state()
-                                        self.state = 'exploration_state'
-                                        self._knockback_player()
-                                    else:
-                                        # Trigger enemy attack lunge
-                                        self.combat_turn = 'enemy'
-                                        self.enemy_attack_active = True
-                                        self.enemy_attack_start_time = pygame.time.get_ticks()
-                                        self.parry_attempted = False
-                                        self.parry_success = False
-                                        
-                                        # Randomly pick target: 'player' or 'saif' (only if recruited)
-                                        if self.saif_recruited:
-                                            self.enemy_target = random.choice(['player', 'saif'])
-                                        else:
-                                            self.enemy_target = 'player'
-                                        target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
-                                        self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
-                                        
-                                        # Randomize forward attack lunge duration (300ms to 750ms)
-                                        self.forward_duration = random.randint(300, 750)
-                                        self.total_duration = self.forward_duration * 2
-                                        
-                                        # Scale parry window centered on impact
-                                        self.parry_window_start = self.forward_duration - 100
-                                        self.parry_window_end = self.forward_duration + 20
-                                        print(f"[Debug System] Enemy targets: {self.enemy_target.upper()}. Attack Speed Picked: {self.forward_duration}ms. Parry range: {self.parry_window_start} - {self.parry_window_end}")
-                                
-                                elif selected_option == 'Talk':
-                                    # Enter Talk Input Mode
-                                    self.combat_mode = 'talk_input'
-                                    self.chat_input_text = ""
-                                    
-                                elif selected_option == 'Item':
-                                    potions = self.inventory.get("health_potion", 0)
-                                    if potions > 0:
-                                        if self.saif_recruited:
-                                            self.combat_mode = 'item_target'
-                                            print("[Combat] Item selected. Select target: 1 for Player, 2 for Saif.")
-                                        else:
-                                            self.inventory["health_potion"] = potions - 1
-                                            self.player_hp = min(100, self.player_hp + 50)
-                                            self._save_game_state()
-                                            print(f"Used a Health Potion! Restored 50 HP. Player HP: {self.player_hp}")
-                                            
-                                            # Transition to enemy turn
-                                            self.combat_turn = 'enemy'
-                                            self.enemy_attack_active = True
-                                            self.enemy_attack_start_time = pygame.time.get_ticks()
-                                            self.parry_attempted = False
-                                            self.parry_success = False
-                                            
-                                            self.enemy_target = 'player'
-                                            target_y = self.player_combat_pos[1]
-                                            self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
-                                            
-                                            self.forward_duration = random.randint(300, 750)
-                                            self.total_duration = self.forward_duration * 2
-                                            self.parry_window_start = self.forward_duration - 100
-                                            self.parry_window_end = self.forward_duration + 20
-                                            print(f"[Debug System] Enemy targets: PLAYER. Attack Speed Picked: {self.forward_duration}ms. Parry range: {self.parry_window_start} - {self.parry_window_end}")
-                                    else:
-                                        print("No items left!")
-                                        
-                                elif selected_option == 'Flee':
-                                    print("Fled from battle!")
-                                    self._knockback_player()
-                                    self.state = 'exploration_state'
-                                    
-                        elif self.combat_mode == 'talk_input':
-                            if event.key == pygame.K_ESCAPE:
-                                # Cancel and return to menu
-                                self.combat_mode = 'menu'
-                            elif event.key == pygame.K_BACKSPACE:
-                                # Delete last character
-                                self.chat_input_text = self.chat_input_text[:-1]
-                            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                                # Submit chat input
-                                if self.chat_input_text.strip():
-                                    # Construct context-aware game state
-                                    game_state = {
-                                        "player_hp": self.player_hp,
-                                        "enemy_hp": self.enemy_hp,
-                                        "saif_respect": self.saif_respect,
-                                        "saif_hp": self.saif_hp,
-                                        "chat_history": self.chat_history,
-                                        "llm_provider": self.llm_provider,
-                                        "ollama_model": self.ollama_model,
-                                        "ollama_url": self.ollama_url
-                                    }
-                                    res_dict = generate_llm_response(self.chat_input_text, game_state)
-                                    dialogue = res_dict.get("dialogue", "Saif remains silent.")
-                                    change = res_dict.get("respect_change", 0)
-                                    
-                                    # Apply respect change
-                                    self._adjust_respect(change)
-                                    
-                                    # Append exchange to rolling chat history and limit to most recent 3
-                                    self.chat_history.append([self.chat_input_text, dialogue])
-                                    if len(self.chat_history) > 3:
-                                        self.chat_history.pop(0)
-                                        
-                                    self._save_game_state()
-                                    print(f"\n[Debug Memory] Current chat_history: {self.chat_history}\n")
-                                    
-                                    self.talk_response_text = dialogue
-                                    self.talk_response_start_time = pygame.time.get_ticks()
-                                    self.combat_mode = 'talk_response'
-                            else:
-                                # Append key characters (only standard printable text, max 60 characters for multiline input)
-                                if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 60:
-                                    self.chat_input_text += event.unicode
-                                    
-                        elif self.combat_mode == 'item_target':
-                            if event.key == pygame.K_ESCAPE:
-                                self.combat_mode = 'menu'
-                            elif event.key in (pygame.K_1, pygame.K_KP1):
-                                potions = self.inventory.get("health_potion", 0)
-                                if potions > 0:
-                                    self.inventory["health_potion"] = potions - 1
-                                    self.player_hp = min(100, self.player_hp + 50)
-                                    self._save_game_state()
-                                    print(f"Used a Health Potion! Restored 50 HP to Player. Player HP: {self.player_hp}")
-                                    
-                                    self.combat_mode = 'menu'
-                                    self.combat_turn = 'enemy'
-                                    self.enemy_attack_active = True
-                                    self.enemy_attack_start_time = pygame.time.get_ticks()
-                                    self.parry_attempted = False
-                                    self.parry_success = False
-                                    
-                                    self.enemy_target = random.choice(['player', 'saif'])
-                                    target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
-                                    self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
-                                    
-                                    self.forward_duration = random.randint(300, 750)
-                                    self.total_duration = self.forward_duration * 2
-                                    self.parry_window_start = self.forward_duration - 100
-                                    self.parry_window_end = self.forward_duration + 20
-                                    print(f"[Debug System] Enemy targets: {self.enemy_target.upper()}. Attack Speed Picked: {self.forward_duration}ms. Parry range: {self.parry_window_start} - {self.parry_window_end}")
-                            elif event.key in (pygame.K_2, pygame.K_KP2):
-                                potions = self.inventory.get("health_potion", 0)
-                                if potions > 0:
-                                    self.inventory["health_potion"] = potions - 1
-                                    self.saif_hp = min(100, self.saif_hp + 50)
-                                    self._save_game_state()
-                                    print(f"Used a Health Potion! Restored 50 HP to Saif. Saif HP: {self.saif_hp}")
-                                    
-                                    self.combat_mode = 'menu'
-                                    self.combat_turn = 'enemy'
-                                    self.enemy_attack_active = True
-                                    self.enemy_attack_start_time = pygame.time.get_ticks()
-                                    self.parry_attempted = False
-                                    self.parry_success = False
-                                    
-                                    self.enemy_target = random.choice(['player', 'saif'])
-                                    target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
-                                    self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
-                                    
-                                    self.forward_duration = random.randint(300, 750)
-                                    self.total_duration = self.forward_duration * 2
-                                    self.parry_window_start = self.forward_duration - 100
-                                    self.parry_window_end = self.forward_duration + 20
-                                    print(f"[Debug System] Enemy targets: {self.enemy_target.upper()}. Attack Speed Picked: {self.forward_duration}ms. Parry range: {self.parry_window_start} - {self.parry_window_end}")
-                    
-                    elif self.combat_turn == 'enemy' and self.enemy_attack_active:
-                        # Press Spacebar to parry (only if player is targeted)
-                        if event.key == pygame.K_SPACE and self.enemy_target == 'player':
-                            now = pygame.time.get_ticks()
-                            elapsed = now - self.enemy_attack_start_time
-                            
-                            if not self.parry_attempted:
-                                self.parry_attempted = True
-                                # Verify if press is within the scaled 120ms window
-                                if self.parry_window_start <= elapsed <= self.parry_window_end:
-                                    self.parry_success = True
-                                    print("PERFECT PARRY!")
-                                else:
-                                    self.parry_success = False
-                                    print("Player took damage!")
+                    self._handle_combat_events(event)
+
+    # ── State-specific event handlers ────────────────────────────────────
+
+    def _handle_camp_events(self, event):
+        """Handles KEYDOWN events while in the camp/rest screen."""
+        if event.key == pygame.K_ESCAPE:
+            self.state = 'exploration_state'
+        elif event.key == pygame.K_r:
+            self.player_hp = 100
+            self.saif_hp = 100
+            self.rest_notification_active = True
+            self._save_game_state()
+            print("Party Rested!")
+
+    def _handle_exploration_events(self, event):
+        """Handles KEYDOWN events while exploring the overworld."""
+        if event.key == pygame.K_ESCAPE:
+            self.is_running = False
+        elif event.key == pygame.K_c:
+            self.state = 'camp_state'
+            self.rest_notification_active = False
+            self._load_game_state()
+        elif event.key == pygame.K_e:
+            # 1. Check adjacency to Saif NPC in world space (adjacent is <= 45px distance)
+            if not self.saif_recruited and self.saif_npc_x is not None:
+                dist_x = abs(self.player.x - self.saif_npc_x)
+                dist_y = abs(self.player.y - self.saif_npc_y)
+                if dist_x <= 45 and dist_y <= 45:
+                    self.state = 'dialogue_state'
+                    self.combat_mode = 'talk_input'
+                    self.chat_input_text = ""
+                    self.talk_response_text = ""
+                    print("[System] Entered overworld dialogue with Saif.")
+
+            # 2. Check adjacency to Chest (tile 2) in world space (adjacent is <= 45px distance)
+            if self.chest_x is not None:
+                c_idx = int(self.chest_x // self.tile_size)
+                r_idx = int(self.chest_y // self.tile_size)
+                if self.map_grid[r_idx][c_idx] == 2:
+                    dist_x = abs(self.player.x - self.chest_x)
+                    dist_y = abs(self.player.y - self.chest_y)
+                    if dist_x <= 45 and dist_y <= 45:
+                        # Clear map cell from 2 to 0
+                        self.map_grid[r_idx][c_idx] = 0
+                        self.chest_opened = True
+                        # Increment health_potion in inventory
+                        self.inventory["health_potion"] = self.inventory.get("health_potion", 0) + 1
+                        self._save_game_state()
+                        print("Found a Health Potion!")
+
+    def _handle_dialogue_events(self, event):
+        """Handles KEYDOWN events during peaceful overworld dialogue with Saif."""
+        if event.key == pygame.K_ESCAPE:
+            self.state = 'exploration_state'
+            self.combat_mode = 'menu'
+            print("[System] Left dialogue early.")
+        elif self.combat_mode == 'talk_input':
+            if event.key == pygame.K_BACKSPACE:
+                self.chat_input_text = self.chat_input_text[:-1]
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._process_chat_input(in_combat=False)
+            else:
+                # Append keyboard inputs
+                if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 60:
+                    self.chat_input_text += event.unicode
+
+    def _handle_combat_events(self, event):
+        """Handles KEYDOWN events during the combat state."""
+        if event.key == pygame.K_ESCAPE and self.combat_mode == 'menu':
+            self.is_running = False
+
+        if self.combat_turn == 'player':
+            if self.combat_mode == 'menu':
+                self._handle_combat_menu(event)
+            elif self.combat_mode == 'talk_input':
+                self._handle_combat_talk_input(event)
+            elif self.combat_mode == 'item_target':
+                self._handle_combat_item_target(event)
+
+        elif self.combat_turn == 'enemy' and self.enemy_attack_active:
+            # Press Spacebar to parry (only if player is targeted)
+            if event.key == pygame.K_SPACE and self.enemy_target == 'player':
+                now = pygame.time.get_ticks()
+                elapsed = now - self.enemy_attack_start_time
+
+                if not self.parry_attempted:
+                    self.parry_attempted = True
+                    # Verify if press is within the scaled 120ms window
+                    if self.parry_window_start <= elapsed <= self.parry_window_end:
+                        self.parry_success = True
+                        print("PERFECT PARRY!")
+                    else:
+                        self.parry_success = False
+                        print("Player took damage!")
+
+    # ── Combat sub-handlers ──────────────────────────────────────────────
+
+    def _handle_combat_menu(self, event):
+        """Handles menu navigation and action selection during the player's combat turn."""
+        # Cycle options with Up / Down arrows
+        if event.key == pygame.K_UP:
+            self.menu_index = (self.menu_index - 1) % len(self.menu_options)
+        elif event.key == pygame.K_DOWN:
+            self.menu_index = (self.menu_index + 1) % len(self.menu_options)
+
+        # Enter key triggers option select
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            selected_option = self.menu_options[self.menu_index]
+
+            if selected_option == 'Attack':
+                base_dmg = 20
+                saif_dmg = 0
+
+                # Coordinated attack from Saif if recruited
+                if self.saif_recruited:
+                    if self.saif_respect < 50:
+                        # 50% chance of disobedience/defiance
+                        if random.random() < 0.5:
+                            print("[Defiant] Saif refuses your coordinate command and stands idle!")
+                        else:
+                            print("[Combat] Saif executes a reluctant support strike! (+10 DMG)")
+                            saif_dmg = 10
+                    else:
+                        print("[Combat] Saif executes a coordinated support strike! (+10 DMG)")
+                        saif_dmg = 10
+
+                total_dmg = base_dmg + saif_dmg
+                self.enemy_hp = max(0, self.enemy_hp - total_dmg)
+                self._save_game_state()
+                print(f"Attack executed! Total damage: {total_dmg}. Enemy HP: {self.enemy_hp}")
+
+                # Check if enemy defeated
+                if self.enemy_hp <= 0:
+                    print("Battle Over! Victory achieved.")
+                    self._reset_combat_only_state()
+                    self.state = 'exploration_state'
+                    self._knockback_player()
+                else:
+                    self._start_enemy_turn()
+
+            elif selected_option == 'Talk':
+                # Enter Talk Input Mode
+                self.combat_mode = 'talk_input'
+                self.chat_input_text = ""
+
+            elif selected_option == 'Item':
+                potions = self.inventory.get("health_potion", 0)
+                if potions > 0:
+                    if self.saif_recruited:
+                        self.combat_mode = 'item_target'
+                        print("[Combat] Item selected. Select target: 1 for Player, 2 for Saif.")
+                    else:
+                        self.inventory["health_potion"] = potions - 1
+                        self.player_hp = min(100, self.player_hp + 50)
+                        self._save_game_state()
+                        print(f"Used a Health Potion! Restored 50 HP. Player HP: {self.player_hp}")
+                        self._start_enemy_turn()
+                else:
+                    print("No items left!")
+
+            elif selected_option == 'Flee':
+                print("Fled from battle!")
+                self._knockback_player()
+                self.state = 'exploration_state'
+
+    def _handle_combat_talk_input(self, event):
+        """Handles text entry during the combat Talk action."""
+        if event.key == pygame.K_ESCAPE:
+            # Cancel and return to menu
+            self.combat_mode = 'menu'
+        elif event.key == pygame.K_BACKSPACE:
+            # Delete last character
+            self.chat_input_text = self.chat_input_text[:-1]
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._process_chat_input(in_combat=True)
+        else:
+            # Append key characters (only standard printable text, max 60 characters for multiline input)
+            if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 60:
+                self.chat_input_text += event.unicode
+
+    def _handle_combat_item_target(self, event):
+        """Handles target selection when using items during combat."""
+        if event.key == pygame.K_ESCAPE:
+            self.combat_mode = 'menu'
+        elif event.key in (pygame.K_1, pygame.K_KP1):
+            potions = self.inventory.get("health_potion", 0)
+            if potions > 0:
+                self.inventory["health_potion"] = potions - 1
+                self.player_hp = min(100, self.player_hp + 50)
+                self._save_game_state()
+                print(f"Used a Health Potion! Restored 50 HP to Player. Player HP: {self.player_hp}")
+                self.combat_mode = 'menu'
+                self._start_enemy_turn()
+        elif event.key in (pygame.K_2, pygame.K_KP2):
+            potions = self.inventory.get("health_potion", 0)
+            if potions > 0:
+                self.inventory["health_potion"] = potions - 1
+                self.saif_hp = min(100, self.saif_hp + 50)
+                self._save_game_state()
+                print(f"Used a Health Potion! Restored 50 HP to Saif. Saif HP: {self.saif_hp}")
+                self.combat_mode = 'menu'
+                self._start_enemy_turn()
+
 
     def _update_camera(self):
         """
@@ -695,28 +671,7 @@ class Game:
                 if now - self.talk_response_start_time >= 4000:
                     # Reset player menu mode and trigger Enemy Turn
                     self.combat_mode = 'menu'
-                    self.combat_turn = 'enemy'
-                    self.enemy_attack_active = True
-                    self.enemy_attack_start_time = pygame.time.get_ticks()
-                    self.parry_attempted = False
-                    self.parry_success = False
-                    
-                    # Randomly pick target: 'player' or 'saif' (only if recruited)
-                    if self.saif_recruited:
-                        self.enemy_target = random.choice(['player', 'saif'])
-                    else:
-                        self.enemy_target = 'player'
-                    target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
-                    self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
-                    
-                    # Randomize forward attack lunge duration (300ms to 750ms)
-                    self.forward_duration = random.randint(300, 750)
-                    self.total_duration = self.forward_duration * 2
-                    
-                    # Scale parry window centered on impact
-                    self.parry_window_start = self.forward_duration - 100
-                    self.parry_window_end = self.forward_duration + 20
-                    print(f"[Debug System] Enemy targets: {self.enemy_target.upper()}. Attack Speed Picked: {self.forward_duration}ms. Parry range: {self.parry_window_start} - {self.parry_window_end}")
+                    self._start_enemy_turn()
                     
             elif self.combat_turn == 'enemy' and self.enemy_attack_active:
                 now = pygame.time.get_ticks()
@@ -775,8 +730,8 @@ class Game:
         
         if self.state in ('exploration_state', 'dialogue_state'):
             # Render solid grey walls from map grid first with frustum culling
-            if hasattr(self, 'map_grid') and self.map_grid:
-                tile_size = 40
+            if self.map_grid:
+                tile_size = self.tile_size
                 wall_color = (60, 60, 68)      # Modern slate grey
                 border_color = (48, 48, 54)    # Darker grey for tile borders
                 

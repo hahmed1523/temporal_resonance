@@ -1,6 +1,8 @@
 import pygame
 import math
 
+from engine.level_maps import TILE_SIZE
+
 class Player:
     """
     Represents the player entity in the game world.
@@ -58,7 +60,7 @@ class Player:
             dy /= length
             
             shrink = self.shrink
-            tile_size = 40
+            tile_size = TILE_SIZE
             
             # 1. Apply horizontal speed and delta-time scaling
             if dx != 0.0:
@@ -115,7 +117,7 @@ class Player:
             True if player collision Rect overlaps a solid tile, False otherwise.
         """
         collision_rect = self.get_collision_rect()
-        tile_size = 40 # Size of each map cell matches player and grid scale
+        tile_size = TILE_SIZE
         
         for r_idx, row in enumerate(map_grid):
             for c_idx, cell in enumerate(row):
