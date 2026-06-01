@@ -13,22 +13,44 @@ from engine.level_maps import DEFAULT_MAP_GRID
 def reset_game_state():
     """
     Overwrites the game_state.json file with our default starting values
-    to prevent persistence of HP, Respect, and chat history between sessions.
+    to prevent persistence of HP, Respect, and chat history between sessions,
+    while preserving custom LLM configuration keys if they already exist.
     """
     state_dir = "data"
     os.makedirs(state_dir, exist_ok=True)
     state_file = os.path.join(state_dir, "game_state.json")
+    
+    # Configuration defaults
+    llm_provider = "gemini"
+    ollama_model = "gemma4:e4b"
+    ollama_url = "http://localhost:11434"
+    
+    # Try to load existing configuration keys
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r") as f:
+                existing_data = json.load(f)
+                llm_provider = existing_data.get("llm_provider", llm_provider)
+                ollama_model = existing_data.get("ollama_model", ollama_model)
+                ollama_url = existing_data.get("ollama_url", ollama_url)
+        except Exception:
+            pass  # Fall back to defaults if file is corrupted
+            
     default_state = {
         "player_hp": 100,
         "enemy_hp": 100,
         "saif_respect": 50,
         "saif_hp": 100,
         "chest_opened": False,
-        "chat_history": []
+        "saif_recruited": False,
+        "chat_history": [],
+        "llm_provider": llm_provider,
+        "ollama_model": ollama_model,
+        "ollama_url": ollama_url
     }
     with open(state_file, "w") as f:
         json.dump(default_state, f, indent=2)
-    print("[System] game_state.json reset to default starting values.")
+    print("[System] game_state.json reset to default starting values (config preserved).")
 
 def main():
     """

@@ -1,8 +1,14 @@
 {
   "player_hp": 100,
   "enemy_hp": 100,
-  "saif_respect": 50,
+  "saif_respect": 75,
   "saif_hp": 100,
   "chest_opened": false,
-  "chat_history": []
+  "saif_recruited": true,
+  "chat_history": [
+    [
+      "I believe we can protect this land together.",
+      "[Heuristic Saif] I... I want to protect you, but the desert has taken so much. Perhaps your words have truth."
+    ]
+  ]
 }

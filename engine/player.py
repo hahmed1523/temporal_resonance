@@ -25,7 +25,7 @@ class Player:
         self.color = color
         self.shrink = shrink
 
-    def handle_input(self, keys: pygame.key.ScancodeWrapper, dt: float, screen_width: int, screen_height: int, map_grid: list = None):
+    def handle_input(self, keys: pygame.key.ScancodeWrapper, dt: float, screen_width: int, screen_height: int, map_grid: list = None, saif_recruited: bool = False):
         """
         Processes keyboard inputs and moves the player smoothly using delta time.
         Implements diagonal movement speed normalization and axis-discrete sliding wall collisions.
@@ -36,6 +36,7 @@ class Player:
             screen_width: The width of the game screen (for clamping)
             screen_height: The height of the game screen (for clamping)
             map_grid: The 2D level matrix containing wall blocks
+            saif_recruited: Boolean indicating if Saif has been recruited to the party
         """
         # Determine movement vector from arrow keys
         dx = 0.0
@@ -67,7 +68,7 @@ class Player:
                     collision_rect = self.get_collision_rect()
                     for r_idx, row in enumerate(map_grid):
                         for c_idx, cell in enumerate(row):
-                            if cell == 1:
+                            if cell == 1 or (cell == 3 and not saif_recruited):
                                 wall_rect = pygame.Rect(c_idx * tile_size, r_idx * tile_size, tile_size, tile_size)
                                 if collision_rect.colliderect(wall_rect):
                                     # Horizontal collision: Push player flush against the wall boundary
@@ -85,7 +86,7 @@ class Player:
                     collision_rect = self.get_collision_rect()
                     for r_idx, row in enumerate(map_grid):
                         for c_idx, cell in enumerate(row):
-                            if cell == 1:
+                            if cell == 1 or (cell == 3 and not saif_recruited):
                                 wall_rect = pygame.Rect(c_idx * tile_size, r_idx * tile_size, tile_size, tile_size)
                                 if collision_rect.colliderect(wall_rect):
                                     # Vertical collision: Push player flush against the wall boundary
@@ -102,12 +103,13 @@ class Player:
         shrink = self.shrink
         return pygame.Rect(int(self.x) + shrink, int(self.y) + shrink, self.size - shrink * 2, self.size - shrink * 2)
 
-    def check_wall_collisions(self, map_grid: list) -> bool:
+    def check_wall_collisions(self, map_grid: list, saif_recruited: bool = False) -> bool:
         """
-        Checks if the player's collision hitbox overlaps with any solid wall block (1).
+        Checks if the player's collision hitbox overlaps with any solid wall block (1) or unrecruited Saif (3).
         
         Args:
             map_grid: The 2D level layout list
+            saif_recruited: Boolean indicating if Saif has been recruited to the party
             
         Returns:
             True if player collision Rect overlaps a solid tile, False otherwise.
@@ -117,7 +119,7 @@ class Player:
         
         for r_idx, row in enumerate(map_grid):
             for c_idx, cell in enumerate(row):
-                if cell == 1:
+                if cell == 1 or (cell == 3 and not saif_recruited):
                     wall_rect = pygame.Rect(c_idx * tile_size, r_idx * tile_size, tile_size, tile_size)
                     if collision_rect.colliderect(wall_rect):
                         return True

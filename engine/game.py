@@ -69,6 +69,16 @@ class Game:
         # Golden Chest at tile row 26, col 20
         self.chest = Chest(800, 1040)
         
+        # Scan grid to find Saif NPC tile 3
+        self.saif_npc_x = None
+        self.saif_npc_y = None
+        for r_idx, row in enumerate(self.map_grid):
+            for c_idx, cell in enumerate(row):
+                if cell == 3:
+                    self.saif_npc_x = c_idx * self.tile_size
+                    self.saif_npc_y = r_idx * self.tile_size
+                    break
+        
         # Trigger initial camera centering
         self._update_camera()
         
@@ -107,9 +117,36 @@ class Game:
         # Camp Mode State Variables
         self.rest_notification_active = False
 
+    def _adjust_respect(self, change: int):
+        """
+        Adjusts Saif's respect meter, keeping it within [0, 100].
+        Triggers defection (leaves party forever) if respect hits 0.
+        """
+        self.saif_respect = max(0, min(100, self.saif_respect + change))
+        if self.saif_recruited and self.saif_respect <= 0:
+            print("[System] Saif's respect hit 0! He has abandoned your party forever.")
+            self.saif_recruited = False
+            self.saif_hp = 100
+        elif self.saif_recruited and self.saif_respect <= 20:
+            print("[System] WARNING: Saif's respect is critically low (<= 20)!")
+
+    def _reset_combat_only_state(self):
+        """
+        Resets combat-specific variables only, preserving long-term relationship
+        metrics like respect and recruitment status.
+        """
+        self.player_hp = 100
+        self.enemy_hp = 100
+        self.saif_hp = 100
+        self.combat_turn = 'player'
+        self.combat_mode = 'menu'
+        self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
+        self.enemy_attack_active = False
+        self._save_game_state()
+
     def _load_game_state(self):
         """
-        Loads player and enemy HP and respect parameters from the data/game_state.json file.
+        Loads player and enemy HP, respect, and LLM configuration parameters from the data/game_state.json file.
         Creates default values if the file doesn't exist.
         """
         os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
@@ -117,6 +154,10 @@ class Game:
         # Initialize defaults in memory
         self.chat_history = []
         self.chest_opened = False
+        self.saif_recruited = False
+        self.llm_provider = "gemini"
+        self.ollama_model = "gemma4:e4b"
+        self.ollama_url = "http://localhost:11434"
         
         if os.path.exists(self.state_file_path):
             try:
@@ -127,7 +168,11 @@ class Game:
                     self.saif_respect = data.get("saif_respect", 50)
                     self.saif_hp = data.get("saif_hp", 100)
                     self.chest_opened = data.get("chest_opened", False)
+                    self.saif_recruited = data.get("saif_recruited", False)
                     self.chat_history = data.get("chat_history", [])
+                    self.llm_provider = data.get("llm_provider", self.llm_provider)
+                    self.ollama_model = data.get("ollama_model", self.ollama_model)
+                    self.ollama_url = data.get("ollama_url", self.ollama_url)
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -136,19 +181,33 @@ class Game:
 
     def _reset_state_to_default(self):
         """
-        Resets active game variables in memory and commits them back to JSON.
+        Resets active game variables in memory while preserving custom LLM configurations,
+        and commits them back to JSON.
         """
         self.player_hp = 100
         self.enemy_hp = 100
         self.saif_respect = 50
         self.saif_hp = 100
         self.chest_opened = False
+        self.saif_recruited = False
         self.chat_history = []
+        
+        # Load and preserve config keys from file if it exists
+        if os.path.exists(self.state_file_path):
+            try:
+                with open(self.state_file_path, 'r') as f:
+                    data = json.load(f)
+                    self.llm_provider = data.get("llm_provider", self.llm_provider)
+                    self.ollama_model = data.get("ollama_model", self.ollama_model)
+                    self.ollama_url = data.get("ollama_url", self.ollama_url)
+            except Exception:
+                pass
+                
         self._save_game_state()
 
     def _save_game_state(self):
         """
-        Saves current memory parameters back to the external data/game_state.json file.
+        Saves current memory parameters and configuration values back to the external data/game_state.json file.
         """
         data = {
             "player_hp": self.player_hp,
@@ -156,7 +215,11 @@ class Game:
             "saif_respect": self.saif_respect,
             "saif_hp": self.saif_hp,
             "chest_opened": self.chest_opened,
-            "chat_history": self.chat_history
+            "saif_recruited": self.saif_recruited,
+            "chat_history": self.chat_history,
+            "llm_provider": self.llm_provider,
+            "ollama_model": self.ollama_model,
+            "ollama_url": self.ollama_url
         }
         try:
             with open(self.state_file_path, 'w') as f:
@@ -193,14 +256,14 @@ class Game:
             # Try horizontal step
             self.player.x += dx * step_size
             self.player.clamp_to_screen(self.world_width, self.world_height)
-            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid):
+            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid, self.saif_recruited):
                 # Collision: Revert horizontal step
                 self.player.x -= dx * step_size
                 
             # Try vertical step
             self.player.y += dy * step_size
             self.player.clamp_to_screen(self.world_width, self.world_height)
-            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid):
+            if hasattr(self, 'map_grid') and self.player.check_wall_collisions(self.map_grid, self.saif_recruited):
                 # Collision: Revert vertical step
                 self.player.y -= dy * step_size
                 
@@ -256,6 +319,62 @@ class Game:
                         self.state = 'camp_state'
                         self.rest_notification_active = False
                         self._load_game_state()
+                    elif event.key == pygame.K_e:
+                        # Check adjacency to Saif NPC in world space (adjacent is <= 45px distance)
+                        if not self.saif_recruited and self.saif_npc_x is not None:
+                            dist_x = abs(self.player.x - self.saif_npc_x)
+                            dist_y = abs(self.player.y - self.saif_npc_y)
+                            if dist_x <= 45 and dist_y <= 45:
+                                self.state = 'dialogue_state'
+                                self.combat_mode = 'talk_input'
+                                self.chat_input_text = ""
+                                self.talk_response_text = ""
+                                print("[System] Entered overworld dialogue with Saif.")
+                
+                # Peaceful Overworld Dialogue Controls
+                elif self.state == 'dialogue_state':
+                    if event.key == pygame.K_ESCAPE:
+                        self.state = 'exploration_state'
+                        print("[System] Left dialogue early.")
+                    elif self.combat_mode == 'talk_input':
+                        if event.key == pygame.K_BACKSPACE:
+                            self.chat_input_text = self.chat_input_text[:-1]
+                        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            if self.chat_input_text.strip():
+                                # Construct context-aware peaceful game state
+                                game_state = {
+                                    "player_hp": self.player_hp,
+                                    "enemy_hp": self.enemy_hp,
+                                    "saif_respect": self.saif_respect,
+                                    "saif_hp": self.saif_hp,
+                                    "chat_history": self.chat_history,
+                                    "in_combat": False,
+                                    "llm_provider": self.llm_provider,
+                                    "ollama_model": self.ollama_model,
+                                    "ollama_url": self.ollama_url
+                                }
+                                res_dict = generate_llm_response(self.chat_input_text, game_state)
+                                dialogue = res_dict.get("dialogue", "Saif remains silent.")
+                                change = res_dict.get("respect_change", 0)
+                                
+                                # Apply respect change
+                                self._adjust_respect(change)
+                                
+                                # Append to memory and prune to last 3
+                                self.chat_history.append([self.chat_input_text, dialogue])
+                                if len(self.chat_history) > 3:
+                                    self.chat_history.pop(0)
+                                    
+                                self._save_game_state()
+                                print(f"\n[Debug Memory] Current chat_history: {self.chat_history}\n")
+                                
+                                self.talk_response_text = dialogue
+                                self.talk_response_start_time = pygame.time.get_ticks()
+                                self.combat_mode = 'talk_response'
+                        else:
+                            # Append keyboard inputs
+                            if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 60:
+                                self.chat_input_text += event.unicode
                 
                 # Combat State Controls
                 elif self.state == 'combat_state':
@@ -274,15 +393,31 @@ class Game:
                                 selected_option = self.menu_options[self.menu_index]
                                 
                                 if selected_option == 'Attack':
-                                    # Deduct 20 HP from enemy
-                                    self.enemy_hp = max(0, self.enemy_hp - 20)
+                                    base_dmg = 20
+                                    saif_dmg = 0
+                                    
+                                    # Coordinated attack from Saif if recruited
+                                    if self.saif_recruited:
+                                        if self.saif_respect < 50:
+                                            # 50% chance of disobedience/defiance
+                                            if random.random() < 0.5:
+                                                print("[Defiant] Saif refuses your coordinate command and stands idle!")
+                                            else:
+                                                print("[Combat] Saif executes a reluctant support strike! (+10 DMG)")
+                                                saif_dmg = 10
+                                        else:
+                                            print("[Combat] Saif executes a coordinated support strike! (+10 DMG)")
+                                            saif_dmg = 10
+                                            
+                                    total_dmg = base_dmg + saif_dmg
+                                    self.enemy_hp = max(0, self.enemy_hp - total_dmg)
                                     self._save_game_state()
-                                    print(f"Player attacked! Enemy HP: {self.enemy_hp}")
+                                    print(f"Attack executed! Total damage: {total_dmg}. Enemy HP: {self.enemy_hp}")
                                     
                                     # Check if enemy defeated
                                     if self.enemy_hp <= 0:
-                                        print("Battle Over!")
-                                        self._reset_state_to_default()
+                                        print("Battle Over! Victory achieved.")
+                                        self._reset_combat_only_state()
                                         self.state = 'exploration_state'
                                         self._knockback_player()
                                     else:
@@ -293,8 +428,11 @@ class Game:
                                         self.parry_attempted = False
                                         self.parry_success = False
                                         
-                                        # Randomly pick target: 'player' or 'saif'
-                                        self.enemy_target = random.choice(['player', 'saif'])
+                                        # Randomly pick target: 'player' or 'saif' (only if recruited)
+                                        if self.saif_recruited:
+                                            self.enemy_target = random.choice(['player', 'saif'])
+                                        else:
+                                            self.enemy_target = 'player'
                                         target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
                                         self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
                                         
@@ -333,14 +471,17 @@ class Game:
                                         "enemy_hp": self.enemy_hp,
                                         "saif_respect": self.saif_respect,
                                         "saif_hp": self.saif_hp,
-                                        "chat_history": self.chat_history
+                                        "chat_history": self.chat_history,
+                                        "llm_provider": self.llm_provider,
+                                        "ollama_model": self.ollama_model,
+                                        "ollama_url": self.ollama_url
                                     }
                                     res_dict = generate_llm_response(self.chat_input_text, game_state)
                                     dialogue = res_dict.get("dialogue", "Saif remains silent.")
                                     change = res_dict.get("respect_change", 0)
                                     
                                     # Apply respect change
-                                    self.saif_respect = max(0, min(100, self.saif_respect + change))
+                                    self._adjust_respect(change)
                                     
                                     # Append exchange to rolling chat history and limit to most recent 3
                                     self.chat_history.append([self.chat_input_text, dialogue])
@@ -398,8 +539,8 @@ class Game:
             # Fetch the current state of all keyboard buttons
             keys = pygame.key.get_pressed()
             
-            # Update the player entity using the key states, delta time, and level map
-            self.player.handle_input(keys, dt, self.world_width, self.world_height, self.map_grid)
+            # Update the player entity using the key states, delta time, and level map (pass saif_recruited status)
+            self.player.handle_input(keys, dt, self.world_width, self.world_height, self.map_grid, self.saif_recruited)
             
             # Check collision with the static enemy
             if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
@@ -415,6 +556,20 @@ class Game:
                     
             # Keep camera centered on player
             self._update_camera()
+            
+        # Peaceful dialogue response resolution timer
+        elif self.state == 'dialogue_state' and self.combat_mode == 'talk_response':
+            now = pygame.time.get_ticks()
+            if now - self.talk_response_start_time >= 4000:
+                # Resolve dialogue and check if Saif recruitment criteria is met
+                if self.saif_respect >= 70:
+                    print("Saif joined the party!")
+                    self.saif_recruited = True
+                    self._save_game_state()
+                    self.state = 'exploration_state'
+                else:
+                    self.combat_mode = 'talk_input'
+                    self.chat_input_text = ""
                 
         # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
@@ -430,8 +585,11 @@ class Game:
                     self.parry_attempted = False
                     self.parry_success = False
                     
-                    # Randomly pick target: 'player' or 'saif'
-                    self.enemy_target = random.choice(['player', 'saif'])
+                    # Randomly pick target: 'player' or 'saif' (only if recruited)
+                    if self.saif_recruited:
+                        self.enemy_target = random.choice(['player', 'saif'])
+                    else:
+                        self.enemy_target = 'player'
                     target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
                     self.enemy_combat_current_pos = [self.enemy_combat_start_pos[0], target_y]
                     
@@ -484,8 +642,8 @@ class Game:
                             
                     # Check if either HP hits 0 to end battle
                     if self.player_hp <= 0 or self.saif_hp <= 0:
-                        print("Battle Over!")
-                        self._reset_state_to_default()
+                        print("Battle Over! Defeat.")
+                        self._reset_combat_only_state()
                         self.state = 'exploration_state'
                         self._knockback_player()
                     else:
@@ -499,7 +657,7 @@ class Game:
         # Clear screen with dark mode background
         self.screen.fill(self.bg_color)
         
-        if self.state == 'exploration_state':
+        if self.state in ('exploration_state', 'dialogue_state'):
             # Render solid grey walls from map grid first with frustum culling
             if hasattr(self, 'map_grid') and self.map_grid:
                 tile_size = 40
@@ -527,10 +685,75 @@ class Game:
             # Draw a modern, subtle grid relative to camera offsets for smooth shifting movement
             self._draw_prototype_grid()
             
+            # Render Saif NPC on overworld if not recruited
+            if not self.saif_recruited and self.saif_npc_x is not None:
+                screen_x = self.saif_npc_x - self.camera_x
+                screen_y = self.saif_npc_y - self.camera_y
+                pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
+            
             # Render game entities with camera offsets
             self.enemy.draw(self.screen, self.camera_x, self.camera_y)
             self.chest.draw(self.screen, self.camera_x, self.camera_y)
             self.player.draw(self.screen, self.camera_x, self.camera_y)
+            
+            # Draw Centered Peaceful Conversation Panel (only in dialogue_state)
+            if self.state == 'dialogue_state':
+                # Centered panel box outline (X: 150 to 650, Y: 420 to 580)
+                pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(150, 420, 500, 160))
+                pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(150, 420, 500, 160), 2)
+                
+                # Header
+                self._draw_text(f"Talk to Saif (Respect: {self.saif_respect}/100)", 170, 430, (238, 206, 112))
+                
+                if self.combat_mode == 'talk_input':
+                    # Draw text entry box outline
+                    input_box_rect = pygame.Rect(170, 465, 460, 75)
+                    pygame.draw.rect(self.screen, (16, 16, 20), input_box_rect)
+                    pygame.draw.rect(self.screen, self.grid_color, input_box_rect, 1)
+                    
+                    # Wrap input text to multiple lines of max 40 characters per line
+                    chars_per_line = 40
+                    input_lines = [self.chat_input_text[i:i+chars_per_line] for i in range(0, len(self.chat_input_text), chars_per_line)]
+                    if not input_lines:
+                        input_lines = [""]
+                    
+                    # Render wrapped text with flashing caret on the last active character
+                    for idx, line in enumerate(input_lines):
+                        line_caret = ""
+                        if idx == len(input_lines) - 1:
+                            line_caret = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+                        self._draw_text(line + line_caret, 180, 475 + idx * 25, (255, 255, 255))
+                    
+                    # Helper text
+                    self._draw_text("ESC: Cancel Dialogue | ENTER: Send", 170, 550, (150, 150, 150))
+                    
+                elif self.combat_mode == 'talk_response':
+                    # Render gold header
+                    self._draw_text("Saif:", 170, 465, (238, 206, 112))
+                    
+                    # Wrap Saif response to 40 characters per line
+                    words = self.talk_response_text.split(' ')
+                    lines = []
+                    current_line = ""
+                    for word in words:
+                        test_line = current_line + " " + word if current_line else word
+                        if len(test_line) < 40:
+                            current_line = test_line
+                        else:
+                            lines.append(current_line)
+                            current_line = word
+                    if current_line:
+                        lines.append(current_line)
+                    
+                    # Draw dialogue lines
+                    for idx, line in enumerate(lines[:3]):
+                        self._draw_text(line, 170, 495 + idx * 25, (245, 245, 245))
+                    
+                    # Helper text (if recruited, show join notice, else show wait)
+                    if self.saif_respect >= 70:
+                        self._draw_text("Saif is joining the party...", 170, 550, (46, 139, 87))
+                    else:
+                        self._draw_text("Please wait...", 170, 550, (150, 150, 150))
             
         elif self.state == 'camp_state':
             # Draw a sleek camp screen UI
@@ -546,10 +769,16 @@ class Game:
             self._draw_text("PARTY STATUS:", 100, 160, (200, 200, 210))
             
             self._draw_text(f"- Player HP: {self.player_hp}/100", 120, 210, (30, 144, 255))
-            self._draw_text(f"- Saif (Traumatized Guardian):", 120, 260, (238, 206, 112))
-            self._draw_text(f"  HP: {self.saif_hp}/100 | Respect Meter: {self.saif_respect}/100", 120, 290, (180, 180, 185))
             
-            self._draw_text(f"- Target Enemy HP: {self.enemy_hp}/100", 120, 340, (220, 20, 60))
+            if self.saif_recruited:
+                self._draw_text(f"- Saif (Traumatized Guardian):", 120, 260, (238, 206, 112))
+                self._draw_text(f"  HP: {self.saif_hp}/100 | Respect Meter: {self.saif_respect}/100", 120, 290, (180, 180, 185))
+                if self.saif_respect <= 20:
+                    self._draw_text("  !!! FINAL WARNING: Saif is on the verge of defection (<= 20 respect) !!!", 120, 315, (220, 20, 60))
+            else:
+                self._draw_text("- Saif (Not recruited yet)", 120, 260, (120, 120, 125))
+            
+            self._draw_text(f"- Target Enemy HP: {self.enemy_hp}/100", 120, 350, (220, 20, 60))
             
             pygame.draw.line(self.screen, self.grid_color, (100, 400), (700, 400), 1)
             
@@ -562,14 +791,15 @@ class Game:
                 self._draw_text("Party Rested! HP Restored.", 400, 520, (46, 139, 87), center=True)
             
         elif self.state == 'combat_state':
-            # 1. Draw Player (blue) and Enemy (red) and Saif (green) in their combat layouts
+            # 1. Draw Player (blue) and Enemy (red) and Saif (green, if recruited) in their combat layouts
             # Player (Dodger Blue) static on the left
             player_rect = pygame.Rect(self.player_combat_pos[0], self.player_combat_pos[1], self.player.size, self.player.size)
             pygame.draw.rect(self.screen, self.player.color, player_rect)
             
-            # Saif (Sea Green) static on the left next to player
-            saif_rect = pygame.Rect(self.saif_combat_pos[0], self.saif_combat_pos[1], self.player.size, self.player.size)
-            pygame.draw.rect(self.screen, (46, 139, 87), saif_rect)
+            # Saif (Sea Green) static on the left next to player (only if recruited)
+            if self.saif_recruited:
+                saif_rect = pygame.Rect(self.saif_combat_pos[0], self.saif_combat_pos[1], self.player.size, self.player.size)
+                pygame.draw.rect(self.screen, (46, 139, 87), saif_rect)
             
             # Enemy (Crimson Red) animated/static on the right
             enemy_rect = pygame.Rect(int(self.enemy_combat_current_pos[0]), int(self.enemy_combat_current_pos[1]), self.enemy.size, self.enemy.size)
@@ -659,15 +889,22 @@ class Game:
             pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 462, 200, 8))
             pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(560, 462, int(200 * (self.player_hp / 100.0)), 8))
             
-            # Saif HP Bar
-            self._draw_text(f"SAIF HP: {self.saif_hp}/100", 560, 490, (46, 139, 87))
-            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 512, 200, 8))
-            pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(560, 512, int(200 * (self.saif_hp / 100.0)), 8))
-            
-            # Saif Respect Bar
-            self._draw_text(f"SAIF RESPECT: {self.saif_respect}/100", 560, 540, (218, 165, 32))
-            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 562, 200, 8))
-            pygame.draw.rect(self.screen, (218, 165, 32), pygame.Rect(560, 562, int(200 * (self.saif_respect / 100.0)), 8))
+            # Saif HP and Respect Bars (only if recruited)
+            if self.saif_recruited:
+                self._draw_text(f"SAIF HP: {self.saif_hp}/100", 560, 490, (46, 139, 87))
+                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 512, 200, 8))
+                pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(560, 512, int(200 * (self.saif_hp / 100.0)), 8))
+                
+                # Saif Respect Meter (shows red DEFIANT status if respect < 50)
+                respect_color = (218, 165, 32)
+                respect_label = f"SAIF RESPECT: {self.saif_respect}/100"
+                if self.saif_respect < 50:
+                    respect_color = (220, 20, 60) # Flashing/Steady Red
+                    respect_label += " [DEFIANT]"
+                
+                self._draw_text(respect_label, 560, 540, respect_color)
+                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 562, 200, 8))
+                pygame.draw.rect(self.screen, respect_color, pygame.Rect(560, 562, int(200 * (self.saif_respect / 100.0)), 8))
                 
             # 3. Draw Top State Header Text with Dynamic Turn & Parry Warnings
             if self.combat_turn == 'player':
