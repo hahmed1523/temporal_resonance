@@ -46,7 +46,8 @@ def reset_game_state():
         "chat_history": [],
         "llm_provider": llm_provider,
         "ollama_model": ollama_model,
-        "ollama_url": ollama_url
+        "ollama_url": ollama_url,
+        "inventory": {"health_potion": 0}
     }
     with open(state_file, "w") as f:
         json.dump(default_state, f, indent=2)
