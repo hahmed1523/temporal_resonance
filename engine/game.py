@@ -114,6 +114,10 @@ class Game:
         """
         os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
         
+        # Initialize defaults in memory
+        self.chat_history = []
+        self.chest_opened = False
+        
         if os.path.exists(self.state_file_path):
             try:
                 with open(self.state_file_path, 'r') as f:
@@ -123,6 +127,7 @@ class Game:
                     self.saif_respect = data.get("saif_respect", 50)
                     self.saif_hp = data.get("saif_hp", 100)
                     self.chest_opened = data.get("chest_opened", False)
+                    self.chat_history = data.get("chat_history", [])
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -138,6 +143,7 @@ class Game:
         self.saif_respect = 50
         self.saif_hp = 100
         self.chest_opened = False
+        self.chat_history = []
         self._save_game_state()
 
     def _save_game_state(self):
@@ -149,7 +155,8 @@ class Game:
             "enemy_hp": self.enemy_hp,
             "saif_respect": self.saif_respect,
             "saif_hp": self.saif_hp,
-            "chest_opened": self.chest_opened
+            "chest_opened": self.chest_opened,
+            "chat_history": self.chat_history
         }
         try:
             with open(self.state_file_path, 'w') as f:
@@ -320,20 +327,35 @@ class Game:
                             elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                                 # Submit chat input
                                 if self.chat_input_text.strip():
-                                    res_dict = generate_llm_response(self.chat_input_text, self.saif_respect)
+                                    # Construct context-aware game state
+                                    game_state = {
+                                        "player_hp": self.player_hp,
+                                        "enemy_hp": self.enemy_hp,
+                                        "saif_respect": self.saif_respect,
+                                        "saif_hp": self.saif_hp,
+                                        "chat_history": self.chat_history
+                                    }
+                                    res_dict = generate_llm_response(self.chat_input_text, game_state)
                                     dialogue = res_dict.get("dialogue", "Saif remains silent.")
                                     change = res_dict.get("respect_change", 0)
                                     
-                                    # Apply respect change and save
+                                    # Apply respect change
                                     self.saif_respect = max(0, min(100, self.saif_respect + change))
+                                    
+                                    # Append exchange to rolling chat history and limit to most recent 3
+                                    self.chat_history.append([self.chat_input_text, dialogue])
+                                    if len(self.chat_history) > 3:
+                                        self.chat_history.pop(0)
+                                        
                                     self._save_game_state()
+                                    print(f"\n[Debug Memory] Current chat_history: {self.chat_history}\n")
                                     
                                     self.talk_response_text = dialogue
                                     self.talk_response_start_time = pygame.time.get_ticks()
                                     self.combat_mode = 'talk_response'
                             else:
-                                # Append key characters (only standard printable text, max 18 characters to fit column)
-                                if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 18:
+                                # Append key characters (only standard printable text, max 60 characters for multiline input)
+                                if event.unicode and ord(event.unicode) >= 32 and len(self.chat_input_text) < 60:
                                     self.chat_input_text += event.unicode
                     
                     elif self.combat_turn == 'enemy' and self.enemy_attack_active:
@@ -583,19 +605,28 @@ class Game:
             # COLUMN 2: Chat Log / Dialogue Box (Center Box X: 250 to 540)
             if self.combat_mode == 'talk_input':
                 # Draw label prompt
-                self._draw_text("Ask Saif:", 270, 425, (200, 200, 210))
+                self._draw_text("Ask Saif:", 270, 415, (200, 200, 210))
                 
-                # Draw text entry box outline
-                input_box_rect = pygame.Rect(270, 460, 250, 36)
+                # Draw multiline text entry box outline
+                input_box_rect = pygame.Rect(270, 445, 250, 90)
                 pygame.draw.rect(self.screen, (16, 16, 20), input_box_rect)
                 pygame.draw.rect(self.screen, self.grid_color, input_box_rect, 1)
                 
-                # Render typed text with a flashing text cursor (limited to fit width)
-                caret = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
-                self._draw_text(self.chat_input_text + caret, 280, 466, (255, 255, 255))
+                # Wrap input text to multiple lines of max 22 characters per line
+                chars_per_line = 22
+                input_lines = [self.chat_input_text[i:i+chars_per_line] for i in range(0, len(self.chat_input_text), chars_per_line)]
+                if not input_lines:
+                    input_lines = [""]
                 
-                # ESC helper text
-                self._draw_text("ESC: Cancel", 270, 515, (150, 150, 150))
+                # Render wrapped text with flashing caret on the last active character
+                for idx, line in enumerate(input_lines):
+                    line_caret = ""
+                    if idx == len(input_lines) - 1:
+                        line_caret = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+                    self._draw_text(line + line_caret, 280, 455 + idx * 25, (255, 255, 255))
+                
+                # Dynamic ESC/ENTER helper text aligned at the bottom
+                self._draw_text("ESC: Cancel | ENTER: Send", 270, 555, (150, 150, 150))
                 
             elif self.combat_mode == 'talk_response':
                 # Render gold header

@@ -4,11 +4,27 @@ import json
 import os
 import random
 
-def generate_llm_response(player_text: str, current_respect: int) -> dict:
+def generate_llm_response(player_text: str, game_state: dict) -> dict:
     """
     Queries standard Gemini API or local Ollama server, with a robust rule-based mock fallback.
+    Injects dynamic game state variables (HP, Respect) and rolling chat history context.
     Returns: dict {"dialogue": str, "respect_change": int}
     """
+    # Extract stats from game_state
+    saif_respect = game_state.get("saif_respect", 50)
+    player_hp = game_state.get("player_hp", 100)
+    enemy_hp = game_state.get("enemy_hp", 100)
+    chat_history = game_state.get("chat_history", [])
+    
+    # Format rolling chat history
+    history_str = ""
+    if chat_history:
+        history_str = "Recent Chat History:\n"
+        for exchange in chat_history:
+            if len(exchange) == 2:
+                history_str += f"Player: \"{exchange[0]}\"\nSaif: \"{exchange[1]}\"\n"
+        history_str += "\n"
+        
     # 1. Check for standard Gemini API Key
     api_key = os.environ.get("GEMINI_API_KEY")
     if api_key:
@@ -16,13 +32,16 @@ def generate_llm_response(player_text: str, current_respect: int) -> dict:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         
         system_instruction = (
-            "You are Saif, a traumatized Arabian Desert Guardian. You are fiercely protective but doubt your own leadership. "
-            "A player is speaking to you in battle. Respond in 1 or 2 short sentences. Based on what they say, decide if "
-            "your respect for them goes up (+10), down (-10), or stays the same (0)."
+            f"You are Saif, an Arabian Desert Guardian. You are currently in battle. "
+            f"Your Respect for the player is {saif_respect}/100. "
+            f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
+            f"Factor these stats into your response. "
+            f"Respond in 1 or 2 short sentences. Based on what they say, decide if "
+            f"your respect for them goes up (+10), down (-10), or stays the same (0)."
         )
         
         prompt = (
-            f"Current Saif Respect level: {current_respect}/100.\n"
+            f"{history_str}"
             f"Player says: \"{player_text}\"\n\n"
             "Return a JSON object matching this schema: {\"dialogue\": \"Saif's reply\", \"respect_change\": integer (-10, 0, or 10)}"
         )
@@ -81,15 +100,19 @@ def generate_llm_response(player_text: str, current_respect: int) -> dict:
     if local_url or os.environ.get("USE_LOCAL_LLM"):
         url = local_url or "http://localhost:11434/v1/chat/completions"
         system_prompt = (
-            "You are Saif, a traumatized Arabian Desert Guardian. You are protective but doubt your own leadership. "
-            "Respond in 1-2 short sentences. Decide if respect changes: +10, -10, or 0. "
-            "You must output ONLY a JSON object matching: {\"dialogue\": \"reply\", \"respect_change\": integer}"
+            f"You are Saif, an Arabian Desert Guardian. You are currently in battle. "
+            f"Your Respect for the player is {saif_respect}/100. "
+            f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
+            f"Factor these stats into your response. "
+            f"Respond in 1-2 short sentences. Decide if respect changes: +10, -10, or 0. "
+            f"You must output ONLY a JSON object matching: {{\"dialogue\": \"reply\", \"respect_change\": integer}}"
         )
+        user_content = f"{history_str}Player: '{player_text}'"
         payload = {
             "model": "llama3",
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Respect: {current_respect}. Player: '{player_text}'"}
+                {"role": "user", "content": user_content}
             ],
             "response_format": {"type": "json_object"}
         }

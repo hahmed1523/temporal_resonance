@@ -1,7 +1,8 @@
 {
   "player_hp": 100,
-  "enemy_hp": 40,
-  "saif_respect": 70,
+  "enemy_hp": 100,
+  "saif_respect": 50,
   "saif_hp": 100,
-  "chest_opened": true
+  "chest_opened": false,
+  "chat_history": []
 }
