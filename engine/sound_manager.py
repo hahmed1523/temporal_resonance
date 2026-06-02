@@ -23,7 +23,8 @@ class SoundManager:
         self.bgm_tracks = {
             "overworld": "assets/audio/overworld_theme.mp3",
             "combat": "assets/audio/battle_theme.mp3",
-            "camp": "assets/audio/camp_theme.mp3"
+            "camp": "assets/audio/camp_theme.mp3",
+            "title": "assets/audio/title_theme.mp3"
         }
         
         # Ensure the mixer is active before attempting to initialize files

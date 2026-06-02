@@ -659,9 +659,9 @@ class Game:
     def _update_bgm(self):
         """
         Updates the background music based on the current location.
-        Treats main menu and settings states as overworld location to play overworld theme.
+        Plays the title theme in the main menu and settings screens.
         """
-        target_location = "overworld" if self.state in ('main_menu_state', 'settings_state') else self.current_location
+        target_location = "title" if self.state in ('main_menu_state', 'settings_state') else self.current_location
         if target_location != self.last_bgm_location:
             self.sound_manager.play_bgm(target_location)
             self.last_bgm_location = target_location
