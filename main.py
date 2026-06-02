@@ -7,8 +7,16 @@ A top-down Chrono Trigger-style 2D RPG engine prototype.
 import sys
 import json
 import os
+
+# Configure SDL to use PulseAudio on WSL2/WSLg for Windows audio passthrough.
+# This must be set BEFORE pygame is imported.
+os.environ.setdefault("SDL_AUDIODRIVER", "pulseaudio")
+
+import pygame
+
 from engine.game import Game
 from engine.level_maps import DEFAULT_MAP_GRID
+
 
 def reset_game_state():
     """
@@ -67,6 +75,14 @@ def main():
     """
     Main entry point for starting the game prototype.
     """
+    # Initialize Pygame and the Mixer
+    pygame.init()
+    try:
+        pygame.mixer.init()
+        print("[System] Pygame mixer initialized successfully.")
+    except Exception as e:
+        print(f"[Warning] Failed to initialize pygame mixer: {e}. Running in silent mode.")
+
     # Create the game manager instance using our level map grid
     game = Game(
         width=800,
@@ -80,3 +96,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

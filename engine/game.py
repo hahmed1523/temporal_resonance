@@ -7,9 +7,11 @@ import math
 from engine.player import Player
 from engine.enemy import Enemy
 from engine.chest import Chest
+from engine.sound_manager import SoundManager
 
 from engine.llm_handler import generate_llm_response, save_api_key_to_env
 from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE, CAMP_MAP_GRID
+
 
 class Game:
     """
@@ -21,6 +23,14 @@ class Game:
         Initializes Pygame, sets up the screen, game clock, and game entities.
         """
         pygame.init()
+        try:
+            pygame.mixer.init()
+        except Exception as e:
+            print(f"[Warning] Failed to initialize pygame mixer in Game: {e}")
+            
+        self.sound_manager = SoundManager()
+        self.last_bgm_location = None
+
         
         # Screen dimensions and title
         self.width = width
@@ -302,8 +312,10 @@ class Game:
         """
         Applies damage to the enemy and triggers VFX (screen shake, white flash, floating texts).
         """
+        self.sound_manager.play_sfx("hit")
         self.enemy_hp = max(0, self.enemy_hp - damage)
         self._save_game_state()
+
 
         target_x = int(self.enemy_combat_current_pos[0] + self.enemy.size // 2)
         target_y = int(self.enemy_combat_current_pos[1])
@@ -644,6 +656,16 @@ class Game:
         self.state = 'exploration_state'
         print("[System] Returned to overworld.")
 
+    def _update_bgm(self):
+        """
+        Updates the background music based on the current location.
+        Treats main menu and settings states as overworld location to play overworld theme.
+        """
+        target_location = "overworld" if self.state in ('main_menu_state', 'settings_state') else self.current_location
+        if target_location != self.last_bgm_location:
+            self.sound_manager.play_bgm(target_location)
+            self.last_bgm_location = target_location
+
     def run(self):
         """
         Starts and coordinates the core game loop.
@@ -783,8 +805,10 @@ class Game:
         """Handles KEYDOWN events while in the overworld Pause Menu."""
         if event.key == pygame.K_UP:
             self.pause_menu_index = (self.pause_menu_index - 1) % len(self.pause_menu_options)
+            self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_DOWN:
             self.pause_menu_index = (self.pause_menu_index + 1) % len(self.pause_menu_options)
+            self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_ESCAPE:
             self.state = 'exploration_state'
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -807,8 +831,10 @@ class Game:
         """Handles KEYDOWN events on the Main Menu."""
         if event.key == pygame.K_UP:
             self.main_menu_index = (self.main_menu_index - 1) % len(self.main_menu_options)
+            self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_DOWN:
             self.main_menu_index = (self.main_menu_index + 1) % len(self.main_menu_options)
+            self.sound_manager.play_sfx("menu_select")
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             selection = self.main_menu_options[self.main_menu_index]
             
@@ -893,8 +919,10 @@ class Game:
                 print("[System] Closed LLM Settings.")
             elif event.key == pygame.K_UP:
                 self.settings_field_index = (self.settings_field_index - 1) % len(self.settings_fields)
+                self.sound_manager.play_sfx("menu_select")
             elif event.key == pygame.K_DOWN:
                 self.settings_field_index = (self.settings_field_index + 1) % len(self.settings_fields)
+                self.sound_manager.play_sfx("menu_select")
             elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 field = self.settings_fields[self.settings_field_index]
                 if field == 'provider':
@@ -971,8 +999,10 @@ class Game:
         # Cycle options with Up / Down arrows
         if event.key == pygame.K_UP:
             self.menu_index = (self.menu_index - 1) % len(self.menu_options)
+            self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_DOWN:
             self.menu_index = (self.menu_index + 1) % len(self.menu_options)
+            self.sound_manager.play_sfx("menu_select")
 
         # Enter key triggers option select
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -1123,6 +1153,9 @@ class Game:
         """
         Updates the state of all active game entities.
         """
+        # Maintain background music state
+        self._update_bgm()
+
         # Allow movement/updates in both exploration and camp states
         if self.state in ('exploration_state', 'camp_state'):
             # Fetch the current state of all keyboard buttons
@@ -1229,6 +1262,7 @@ class Game:
                         if not self.parry_success:
                             if not self.parry_attempted:
                                 print("Player took damage!")
+                            self.sound_manager.play_sfx("hit")
                             self.player_hp = max(0, self.player_hp - 20)
                             self._save_game_state()
                             # Spawn player damage floating text
@@ -1243,6 +1277,8 @@ class Game:
                             self.player_recoil_frames = 6
                             self.screen_shake_frames = 10
                         else:
+                            # Play parry SFX!
+                            self.sound_manager.play_sfx("parry")
                             # Spawn parry text and small shake
                             self.floating_texts.append({
                                 "text": "PARRIED!",
@@ -1254,6 +1290,7 @@ class Game:
                     else:
                         # Saif was targeted: parry is skipped
                         print("Saif took damage!")
+                        self.sound_manager.play_sfx("hit")
                         self.saif_hp = max(0, self.saif_hp - 20)
                         self._save_game_state()
                         # Spawn Saif damage floating text
@@ -1267,6 +1304,7 @@ class Game:
                         self.saif_flash_frames = 5
                         self.saif_recoil_frames = 6
                         self.screen_shake_frames = 10
+
                 
                 if elapsed < self.forward_duration:
                     t = elapsed / self.forward_duration
