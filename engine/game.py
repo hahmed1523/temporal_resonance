@@ -45,6 +45,7 @@ class Game:
         
         # JSON State Configuration
         self.state_file_path = os.path.join("data", "game_state.json")
+        self.save_slot_file = "save_slot_1.json"
         self._load_game_state()
         
         # Initialize Game State
@@ -53,11 +54,17 @@ class Game:
         # Main Menu State Variables
         self.main_menu_index = 0
         self.main_menu_options = ["New Game", "Continue", "Settings", "Quit"]
-        self.save_exists = os.path.exists(self.state_file_path)
+        self.save_exists = os.path.exists(self.save_slot_file)
         if not self.save_exists:
             self.main_menu_index = 0  # Default to New Game if no save
         else:
             self.main_menu_index = 1  # Default to Continue if save exists
+            
+        # Pause Menu State Variables
+        self.pause_menu_index = 0
+        self.pause_menu_options = ["Resume", "Save Game", "Quit to Main Menu"]
+        self.save_confirmed_time = 0
+        self.no_save_message_time = 0
         
         # World map boundaries (grid is 50 rows × 50 cols, each tile is 40×40 px)
         self.tile_size = TILE_SIZE
@@ -351,6 +358,81 @@ class Game:
         except Exception as e:
             print(f"[Error] Failed to save JSON state: {e}")
 
+    def _save_to_save_slot_1(self):
+        """
+        Dumps the entire current game_state dictionary into save_slot_1.json
+        in the project root using Python's json library.
+        """
+        save_data = {
+            "player_hp": self.player_hp,
+            "enemy_hp": self.enemy_hp,
+            "saif_respect": self.saif_respect,
+            "saif_hp": self.saif_hp,
+            "chest_opened": self.chest_opened,
+            "saif_recruited": self.saif_recruited,
+            "chat_history": self.chat_history,
+            "llm_provider": self.llm_provider,
+            "ollama_model": self.ollama_model,
+            "ollama_url": self.ollama_url,
+            "api_base_url": self.api_base_url,
+            "api_model": self.api_model,
+            "llm_think": self.llm_think,
+            "inventory": self.inventory,
+            "player_x": self.player.x,
+            "player_y": self.player.y,
+            "camera_x": self.camera_x,
+            "camera_y": self.camera_y
+        }
+        try:
+            with open(self.save_slot_file, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            print(f"[System] Game saved successfully to {self.save_slot_file}")
+        except Exception as e:
+            print(f"[Error] Failed to write save file: {e}")
+
+    def _load_from_save_slot_1(self):
+        """
+        Loads state from save_slot_1.json, overwriting active memory.
+        """
+        if os.path.exists(self.save_slot_file):
+            try:
+                with open(self.save_slot_file, 'r') as f:
+                    data = json.load(f)
+                    self.player_hp = data.get("player_hp", 100)
+                    self.enemy_hp = data.get("enemy_hp", 100)
+                    self.saif_respect = data.get("saif_respect", 50)
+                    self.saif_hp = data.get("saif_hp", 100)
+                    self.chest_opened = data.get("chest_opened", False)
+                    self.saif_recruited = data.get("saif_recruited", False)
+                    self.chat_history = data.get("chat_history", [])
+                    self.llm_provider = data.get("llm_provider", self.llm_provider)
+                    self.ollama_model = data.get("ollama_model", self.ollama_model)
+                    self.ollama_url = data.get("ollama_url", self.ollama_url)
+                    self.api_base_url = data.get("api_base_url", self.api_base_url)
+                    self.api_model = data.get("api_model", self.api_model)
+                    self.llm_think = data.get("llm_think", self.llm_think)
+                    self.inventory = data.get("inventory", self.inventory)
+                    self.player.x = data.get("player_x", 960)
+                    self.player.y = data.get("player_y", 1040)
+                    self.camera_x = data.get("camera_x", 0.0)
+                    self.camera_y = data.get("camera_y", 0.0)
+                
+                # Align map grid tiles
+                if self.chest_opened and self.chest_x is not None:
+                    c_idx = int(self.chest_x // self.tile_size)
+                    r_idx = int(self.chest_y // self.tile_size)
+                    self.map_grid[r_idx][c_idx] = 0
+                elif not self.chest_opened and self.chest_x is not None:
+                    c_idx = int(self.chest_x // self.tile_size)
+                    r_idx = int(self.chest_y // self.tile_size)
+                    self.map_grid[r_idx][c_idx] = 2
+
+                # Sync to game_state.json so autosaves are updated
+                self._save_game_state()
+                print(f"[System] Game loaded successfully from {self.save_slot_file}")
+            except Exception as e:
+                print(f"[Error] Failed to load JSON state from save slot: {e}")
+
     def _knockback_player(self):
         """
         Knocks the player back by 80 pixels away from the enemy's position
@@ -427,6 +509,8 @@ class Game:
             elif event.type == pygame.KEYDOWN:
                 if self.state == 'main_menu_state':
                     self._handle_main_menu_events(event)
+                elif self.state == 'pause_menu_state':
+                    self._handle_pause_menu_events(event)
                 elif self.state == 'camp_state':
                     self._handle_camp_events(event)
                 elif self.state == 'settings_state':
@@ -454,10 +538,9 @@ class Game:
     def _handle_exploration_events(self, event):
         """Handles KEYDOWN events while exploring the overworld."""
         if event.key == pygame.K_ESCAPE:
-            self.state = 'main_menu_state'
-            # Refresh save status when returning to menu
-            self.save_exists = os.path.exists(self.state_file_path)
-            self.main_menu_index = 1 if self.save_exists else 0
+            self.state = 'pause_menu_state'
+            self.pause_menu_index = 0
+            self.save_confirmed_time = 0
         elif event.key == pygame.K_c:
             self.state = 'camp_state'
             self.rest_notification_active = False
@@ -490,6 +573,30 @@ class Game:
                         self._save_game_state()
                         print("Found a Health Potion!")
 
+    def _handle_pause_menu_events(self, event):
+        """Handles KEYDOWN events while in the overworld Pause Menu."""
+        if event.key == pygame.K_UP:
+            self.pause_menu_index = (self.pause_menu_index - 1) % len(self.pause_menu_options)
+        elif event.key == pygame.K_DOWN:
+            self.pause_menu_index = (self.pause_menu_index + 1) % len(self.pause_menu_options)
+        elif event.key == pygame.K_ESCAPE:
+            self.state = 'exploration_state'
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            selection = self.pause_menu_options[self.pause_menu_index]
+            if selection == "Resume":
+                self.state = 'exploration_state'
+            elif selection == "Save Game":
+                self._save_to_save_slot_1()
+                self.save_confirmed_time = pygame.time.get_ticks()
+            elif selection == "Quit to Main Menu":
+                self.state = 'main_menu_state'
+                # Refresh save status when returning to menu
+                self.save_exists = os.path.exists(self.save_slot_file)
+                if not self.save_exists:
+                    self.main_menu_index = 0
+                else:
+                    self.main_menu_index = 1
+
     def _handle_main_menu_events(self, event):
         """Handles KEYDOWN events on the Main Menu."""
         if event.key == pygame.K_UP:
@@ -500,18 +607,30 @@ class Game:
             selection = self.main_menu_options[self.main_menu_index]
             
             if selection == "New Game":
-                self._reset_state_to_default() # Wipe runtime state, keep config
+                from main import reset_game_state
+                reset_game_state() # Overwrites game_state.json with defaults
+                self._load_game_state() # Load defaults in memory
+                
+                # Reset physical map cells (close chest)
+                if self.chest_x is not None:
+                    c_idx = int(self.chest_x // self.tile_size)
+                    r_idx = int(self.chest_y // self.tile_size)
+                    self.map_grid[r_idx][c_idx] = 2
+                
+                self.player.x, self.player.y = 960, 1040 # Reset starting position
+                self.enemy_hp = 100
+                self.player_hp = 100
+                self.saif_hp = 100
+                self._update_camera()
                 self.state = 'exploration_state'
-                self.player.x, self.player.y = 400, 300 # Reset positions
-                self.camera_x, self.camera_y = 0, 0
                 print("[System] Started New Game.")
             
             elif selection == "Continue":
-                if self.save_exists:
-                    self._load_game_state()
+                if os.path.exists(self.save_slot_file):
+                    self._load_from_save_slot_1()
                     self.state = 'exploration_state'
-                    print("[System] Continued saved game.")
                 else:
+                    self.no_save_message_time = pygame.time.get_ticks()
                     print("[System] No save file found.")
                     
             elif selection == "Settings":
@@ -871,6 +990,10 @@ class Game:
             
             pygame.draw.line(self.screen, self.grid_color, (200, 210), (600, 210), 1)
             
+            # Temporary no save warning
+            if pygame.time.get_ticks() - self.no_save_message_time < 2000:
+                self._draw_text("No save file found!", self.width // 2, 245, (220, 20, 60), center=True)
+            
             # Menu Options
             start_y = 300
             spacing = 50
@@ -879,13 +1002,7 @@ class Game:
                 y = start_y + (i * spacing)
                 is_selected = (i == self.main_menu_index)
                 
-                # Check if Continue is disabled
-                is_disabled = (option == "Continue" and not self.save_exists)
-                
-                if is_disabled:
-                    color = (70, 70, 75)
-                    text = option
-                elif is_selected:
+                if is_selected:
                     color = (30, 144, 255)
                     text = f"> {option} <"
                     # Draw highlight box
@@ -900,7 +1017,7 @@ class Game:
             # Version/Info
             self._draw_text("Use UP/DOWN to navigate | ENTER to select", self.width // 2, 550, (100, 100, 110), center=True)
             
-        elif self.state in ('exploration_state', 'dialogue_state'):
+        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state'):
             # Render solid grey walls from map grid first with frustum culling
             if self.map_grid:
                 tile_size = self.tile_size
@@ -1001,6 +1118,41 @@ class Game:
                         self._draw_text("Saif is joining the party...", 170, 550, (46, 139, 87))
                     else:
                         self._draw_text("Please wait...", 170, 550, (150, 150, 150))
+            
+            # Render Overworld Pause Menu on top if in pause_menu_state
+            if self.state == 'pause_menu_state':
+                # Create a semi-transparent screen-sized rectangle to dim the overworld
+                overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                overlay.fill((10, 10, 15, 180))
+                self.screen.blit(overlay, (0, 0))
+                
+                # Center panel
+                pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(200, 180, 400, 240))
+                pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(200, 180, 400, 240), 2)
+                
+                # Title
+                self._draw_text("GAME PAUSED", self.width // 2, 210, (238, 206, 112), center=True)
+                pygame.draw.line(self.screen, self.grid_color, (230, 235), (570, 235), 1)
+                
+                # Menu options
+                start_y = 260
+                spacing = 45
+                for i, option in enumerate(self.pause_menu_options):
+                    y = start_y + (i * spacing)
+                    is_selected = (i == self.pause_menu_index)
+                    if is_selected:
+                        color = (30, 144, 255)
+                        text = f"> {option} <"
+                        pygame.draw.rect(self.screen, (40, 40, 50), pygame.Rect(240, y - 12, 320, 28))
+                        pygame.draw.rect(self.screen, (60, 60, 75), pygame.Rect(240, y - 12, 320, 28), 1)
+                    else:
+                        color = (200, 200, 210)
+                        text = option
+                    self._draw_text(text, self.width // 2, y, color, center=True)
+                    
+                # Toast notification
+                if pygame.time.get_ticks() - self.save_confirmed_time < 2000:
+                    self._draw_text("Game Saved Successfully!", self.width // 2, 395, (46, 139, 87), center=True)
             
         elif self.state == 'settings_state':
             # ── LLM Settings Screen ──────────────────────────────────────

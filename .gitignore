@@ -16,6 +16,7 @@ __pycache__/
 
 # Game Runtime State (contains chat history, config)
 data/game_state.json
+save_slot_1.json
 
 # IDE
 .idea/
