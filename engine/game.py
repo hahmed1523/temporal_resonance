@@ -173,6 +173,29 @@ class Game:
         self.settings_edit_buffer = ""  # Temp buffer for text input in settings
         self.settings_api_key_display = ""  # Masked display of API key
 
+        # VFX State Variables
+        self.screen_shake_frames = 0
+        self.enemy_flash_frames = 0
+        self.player_flash_frames = 0
+        self.saif_flash_frames = 0
+        self.player_recoil_frames = 0
+        self.saif_recoil_frames = 0
+        self.floating_texts = []
+
+        # Combat Animation Variables
+        self.player_combat_current_pos = list(self.player_combat_pos)
+        self.saif_combat_current_pos = list(self.saif_combat_pos)
+        self.player_attack_active = False
+        self.player_attack_start_time = 0
+        self.player_damage_dealt = False
+        self.saif_attack_active = False
+        self.saif_attack_start_time = 0
+        self.saif_damage_dealt = False
+        self.is_combo_attack = False
+        self.combo_damage_applied = False
+        self.enemy_damage_dealt = False
+        self.combo_cooldown = 0
+
     def _adjust_respect(self, change: int):
         """
         Adjusts Saif's respect meter, keeping it within [0, 100].
@@ -198,6 +221,30 @@ class Game:
         self.combat_mode = 'menu'
         self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
         self.enemy_attack_active = False
+        
+        # Reset positions
+        self.player_combat_current_pos = list(self.player_combat_pos)
+        self.saif_combat_current_pos = list(self.saif_combat_pos)
+        
+        # Reset animation states
+        self.player_attack_active = False
+        self.saif_attack_active = False
+        self.player_damage_dealt = False
+        self.saif_damage_dealt = False
+        self.is_combo_attack = False
+        self.combo_damage_applied = False
+        self.enemy_damage_dealt = False
+        self.combo_cooldown = 0
+        
+        # Clear VFX state
+        self.floating_texts = []
+        self.screen_shake_frames = 0
+        self.enemy_flash_frames = 0
+        self.player_flash_frames = 0
+        self.saif_flash_frames = 0
+        self.player_recoil_frames = 0
+        self.saif_recoil_frames = 0
+        
         self._save_game_state()
 
     def _start_enemy_turn(self):
@@ -210,6 +257,7 @@ class Game:
         self.enemy_attack_start_time = pygame.time.get_ticks()
         self.parry_attempted = False
         self.parry_success = False
+        self.enemy_damage_dealt = False
 
         # Randomly pick target: 'player' or 'saif' (only if recruited)
         if self.saif_recruited:
@@ -232,6 +280,64 @@ class Game:
         print(f"[Debug System] Enemy targets: {self.enemy_target.upper()}. "
               f"Attack Speed Picked: {self.forward_duration}ms. "
               f"Parry range: {self.parry_window_start} - {self.parry_window_end}")
+
+    def _end_current_turn(self):
+        """
+        Transitions turn from Player to Saif to Enemy based on recruitment status.
+        If Saif is dead, his turn is skipped.
+        """
+        if self.combat_turn == 'player':
+            if self.saif_recruited and self.saif_hp > 0:
+                self.combat_turn = 'saif'
+                self.menu_index = 0
+                self.combat_mode = 'menu'
+                self.menu_options = ['Attack', 'Special', 'Item', 'Flee']
+                print("[Combat] Saif's Turn!")
+            else:
+                self._start_enemy_turn()
+        elif self.combat_turn == 'saif':
+            self._start_enemy_turn()
+
+    def _apply_damage_to_enemy(self, damage: int, is_combo: bool = False):
+        """
+        Applies damage to the enemy and triggers VFX (screen shake, white flash, floating texts).
+        """
+        self.enemy_hp = max(0, self.enemy_hp - damage)
+        self._save_game_state()
+
+        target_x = int(self.enemy_combat_current_pos[0] + self.enemy.size // 2)
+        target_y = int(self.enemy_combat_current_pos[1])
+
+        if is_combo:
+            self.enemy_flash_frames = 15
+            self.screen_shake_frames = 20
+            self.floating_texts.append({
+                "text": f"-{damage} COMBO!",
+                "x": target_x,
+                "y": target_y - 10,
+                "timer": 45
+            })
+            print(f"[Combat] Combo executed! Damage: {damage}. Enemy HP: {self.enemy_hp}")
+        else:
+            self.enemy_flash_frames = 5
+            self.screen_shake_frames = 10
+            self.floating_texts.append({
+                "text": f"-{damage}",
+                "x": target_x,
+                "y": target_y - 10,
+                "timer": 45
+            })
+            print(f"[Combat] Attack executed! Damage: {damage}. Enemy HP: {self.enemy_hp}")
+
+    def _end_battle_victory(self):
+        """
+        Ends the battle in victory, transitions back to overworld, and knocks back player.
+        """
+        print("Battle Over! Victory achieved.")
+        self._reset_combat_only_state()
+        self.current_location = "overworld"
+        self.state = 'exploration_state'
+        self._knockback_player()
 
     def _process_chat_input(self, in_combat: bool):
         """
@@ -830,13 +936,17 @@ class Game:
         if event.key == pygame.K_ESCAPE and self.combat_mode == 'menu':
             self.is_running = False
 
-        if self.combat_turn == 'player':
+        if self.combat_turn in ('player', 'saif'):
             if self.combat_mode == 'menu':
                 self._handle_combat_menu(event)
             elif self.combat_mode == 'talk_input':
                 self._handle_combat_talk_input(event)
             elif self.combat_mode == 'item_target':
                 self._handle_combat_item_target(event)
+            elif self.combat_mode == 'special':
+                self._handle_combat_special(event)
+            elif self.combat_mode == 'item':
+                self._handle_combat_item(event)
 
         elif self.combat_turn == 'enemy' and self.enemy_attack_active:
             # Press Spacebar to parry (only if player is targeted)
@@ -857,7 +967,7 @@ class Game:
     # ── Combat sub-handlers ──────────────────────────────────────────────
 
     def _handle_combat_menu(self, event):
-        """Handles menu navigation and action selection during the player's combat turn."""
+        """Handles menu navigation and action selection during the player's/Saif's combat turn."""
         # Cycle options with Up / Down arrows
         if event.key == pygame.K_UP:
             self.menu_index = (self.menu_index - 1) % len(self.menu_options)
@@ -869,36 +979,22 @@ class Game:
             selected_option = self.menu_options[self.menu_index]
 
             if selected_option == 'Attack':
-                base_dmg = 20
-                saif_dmg = 0
+                # Trigger slide run attack animations instead of immediate damage
+                if self.combat_turn == 'player':
+                    self.player_attack_active = True
+                    self.player_attack_start_time = pygame.time.get_ticks()
+                    self.player_damage_dealt = False
+                    self.is_combo_attack = False
+                elif self.combat_turn == 'saif':
+                    self.saif_attack_active = True
+                    self.saif_attack_start_time = pygame.time.get_ticks()
+                    self.saif_damage_dealt = False
+                    self.is_combo_attack = False
+                self.combat_mode = 'menu'
+                self.menu_index = 0
 
-                # Coordinated attack from Saif if recruited
-                if self.saif_recruited:
-                    if self.saif_respect < 50:
-                        # 50% chance of disobedience/defiance
-                        if random.random() < 0.5:
-                            print("[Defiant] Saif refuses your coordinate command and stands idle!")
-                        else:
-                            print("[Combat] Saif executes a reluctant support strike! (+10 DMG)")
-                            saif_dmg = 10
-                    else:
-                        print("[Combat] Saif executes a coordinated support strike! (+10 DMG)")
-                        saif_dmg = 10
-
-                total_dmg = base_dmg + saif_dmg
-                self.enemy_hp = max(0, self.enemy_hp - total_dmg)
-                self._save_game_state()
-                print(f"Attack executed! Total damage: {total_dmg}. Enemy HP: {self.enemy_hp}")
-
-                # Check if enemy defeated
-                if self.enemy_hp <= 0:
-                    print("Battle Over! Victory achieved.")
-                    self._reset_combat_only_state()
-                    self.current_location = "overworld"
-                    self.state = 'exploration_state'
-                    self._knockback_player()
-                else:
-                    self._start_enemy_turn()
+            elif selected_option == 'Special':
+                self.combat_mode = 'special'
 
             elif selected_option == 'Talk':
                 # Enter Talk Input Mode
@@ -906,25 +1002,68 @@ class Game:
                 self.chat_input_text = ""
 
             elif selected_option == 'Item':
-                potions = self.inventory.get("health_potion", 0)
-                if potions > 0:
-                    if self.saif_recruited:
-                        self.combat_mode = 'item_target'
-                        print("[Combat] Item selected. Select target: 1 for Player, 2 for Saif.")
-                    else:
-                        self.inventory["health_potion"] = potions - 1
-                        self.player_hp = min(100, self.player_hp + 50)
-                        self._save_game_state()
-                        print(f"Used a Health Potion! Restored 50 HP. Player HP: {self.player_hp}")
-                        self._start_enemy_turn()
-                else:
-                    print("No items left!")
+                self.combat_mode = 'item'
 
             elif selected_option == 'Flee':
                 print("Fled from battle!")
                 self._knockback_player()
                 self.current_location = "overworld"
                 self.state = 'exploration_state'
+
+    def _handle_combat_special(self, event):
+        """Handles navigation and selection inside the Special sub-menu."""
+        if event.key == pygame.K_ESCAPE:
+            self.combat_mode = 'menu'
+            self.menu_index = 0
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            # Try to trigger Combo Strike
+            if self.saif_recruited and self.saif_respect >= 70 and self.combo_cooldown == 0:
+                print("[Combat] Coordinated X-Strike combo initiated!")
+                self.combat_mode = 'menu'
+                self.menu_index = 0
+                
+                # Set cooldown to 2 rounds
+                self.combo_cooldown = 2
+                
+                # Start both attack animations
+                now = pygame.time.get_ticks()
+                self.player_attack_active = True
+                self.player_attack_start_time = now
+                self.player_damage_dealt = False
+                
+                self.saif_attack_active = True
+                self.saif_attack_start_time = now
+                self.saif_damage_dealt = False
+                
+                self.is_combo_attack = True
+                self.combo_damage_applied = False
+            elif self.combo_cooldown > 0:
+                print(f"[Combat] Cannot execute Combo Strike. Move is on cooldown for {self.combo_cooldown} more round(s)!")
+            else:
+                print("[Combat] Cannot execute Combo Strike. Requirements (Saif recruited & 70+ Respect) not met.")
+
+    def _handle_combat_item(self, event):
+        """Handles navigation and selection inside the Item sub-menu."""
+        if event.key == pygame.K_ESCAPE:
+            self.combat_mode = 'menu'
+            self.menu_index = 0
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            potions = self.inventory.get("health_potion", 0)
+            if potions > 0:
+                if self.saif_recruited:
+                    self.combat_mode = 'item_target'
+                    print("[Combat] Item selected. Select target: 1 for Player, 2 for Saif.")
+                else:
+                    self.inventory["health_potion"] = potions - 1
+                    self.player_hp = min(100, self.player_hp + 50)
+                    self._save_game_state()
+                    print(f"Used a Health Potion! Restored 50 HP. Player HP: {self.player_hp}")
+                    
+                    self.combat_mode = 'menu'
+                    self.menu_index = 0
+                    self._end_current_turn()
+            else:
+                print("No items left!")
 
     def _handle_combat_talk_input(self, event):
         """Handles text entry during the combat Talk action."""
@@ -953,7 +1092,7 @@ class Game:
                 self._save_game_state()
                 print(f"Used a Health Potion! Restored 50 HP to Player. Player HP: {self.player_hp}")
                 self.combat_mode = 'menu'
-                self._start_enemy_turn()
+                self._end_current_turn()
         elif event.key in (pygame.K_2, pygame.K_KP2):
             potions = self.inventory.get("health_potion", 0)
             if potions > 0:
@@ -962,7 +1101,7 @@ class Game:
                 self._save_game_state()
                 print(f"Used a Health Potion! Restored 50 HP to Saif. Saif HP: {self.saif_hp}")
                 self.combat_mode = 'menu'
-                self._start_enemy_turn()
+                self._end_current_turn()
 
 
     def _update_camera(self):
@@ -1003,9 +1142,31 @@ class Game:
                     self.combat_turn = 'player'
                     self.menu_index = 0
                     if self.saif_recruited:
-                        self.menu_options = ['Attack', 'Talk', 'Item', 'Flee']
+                        self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
                     else:
                         self.menu_options = ['Attack', 'Item', 'Flee']
+                    
+                    # Reset animation and position variables
+                    self.player_combat_current_pos = list(self.player_combat_pos)
+                    self.saif_combat_current_pos = list(self.saif_combat_pos)
+                    self.player_attack_active = False
+                    self.saif_attack_active = False
+                    self.player_damage_dealt = False
+                    self.saif_damage_dealt = False
+                    self.is_combo_attack = False
+                    self.combo_damage_applied = False
+                    self.enemy_damage_dealt = False
+                    self.combo_cooldown = 0
+                    
+                    # Clear VFX State
+                    self.floating_texts = []
+                    self.screen_shake_frames = 0
+                    self.enemy_flash_frames = 0
+                    self.player_flash_frames = 0
+                    self.saif_flash_frames = 0
+                    self.player_recoil_frames = 0
+                    self.saif_recoil_frames = 0
+                    
                     print("Battle Started!")
                 
             # Keep camera centered on player
@@ -1040,13 +1201,12 @@ class Game:
                 
         # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
-            # Handle response delay timer (2 seconds)
+            # Handle response delay timer (4 seconds)
             if self.combat_turn == 'player' and self.combat_mode == 'talk_response':
                 now = pygame.time.get_ticks()
                 if now - self.talk_response_start_time >= 4000:
-                    # Reset player menu mode and trigger Enemy Turn
                     self.combat_mode = 'menu'
-                    self._start_enemy_turn()
+                    self._end_current_turn()
                     
             elif self.combat_turn == 'enemy' and self.enemy_attack_active:
                 now = pygame.time.get_ticks()
@@ -1061,6 +1221,53 @@ class Game:
                 # Keep Y-axis aligned with the target
                 self.enemy_combat_current_pos[1] = target_y
                 
+                # Check impact peak (forward_duration) to apply damage and flash!
+                if elapsed >= self.forward_duration and not self.enemy_damage_dealt:
+                    self.enemy_damage_dealt = True
+                    if self.enemy_target == 'player':
+                        # Check if player missed parry (didn't parry or failed early/late)
+                        if not self.parry_success:
+                            if not self.parry_attempted:
+                                print("Player took damage!")
+                            self.player_hp = max(0, self.player_hp - 20)
+                            self._save_game_state()
+                            # Spawn player damage floating text
+                            self.floating_texts.append({
+                                "text": "-20",
+                                "x": self.player_combat_pos[0] + self.player.size // 2,
+                                "y": self.player_combat_pos[1],
+                                "timer": 45
+                            })
+                            # Trigger VFX
+                            self.player_flash_frames = 5
+                            self.player_recoil_frames = 6
+                            self.screen_shake_frames = 10
+                        else:
+                            # Spawn parry text and small shake
+                            self.floating_texts.append({
+                                "text": "PARRIED!",
+                                "x": self.player_combat_pos[0] + self.player.size // 2,
+                                "y": self.player_combat_pos[1],
+                                "timer": 45
+                            })
+                            self.screen_shake_frames = 5
+                    else:
+                        # Saif was targeted: parry is skipped
+                        print("Saif took damage!")
+                        self.saif_hp = max(0, self.saif_hp - 20)
+                        self._save_game_state()
+                        # Spawn Saif damage floating text
+                        self.floating_texts.append({
+                            "text": "-20",
+                            "x": self.saif_combat_pos[0] + self.player.size // 2,
+                            "y": self.saif_combat_pos[1],
+                            "timer": 45
+                        })
+                        # Trigger VFX
+                        self.saif_flash_frames = 5
+                        self.saif_recoil_frames = 6
+                        self.screen_shake_frames = 10
+                
                 if elapsed < self.forward_duration:
                     t = elapsed / self.forward_duration
                     self.enemy_combat_current_pos[0] = start_x - (start_x - target_x) * t
@@ -1072,22 +1279,9 @@ class Game:
                     self.enemy_combat_current_pos[0] = self.enemy_combat_start_pos[0]
                     self.enemy_combat_current_pos[1] = self.enemy_combat_start_pos[1]
                     self.enemy_attack_active = False
-                    
-                    if self.enemy_target == 'player':
-                        # Check if player missed parry (didn't parry or failed early/late)
-                        if not self.parry_success:
-                            if not self.parry_attempted:
-                                print("Player took damage!")
-                            self.player_hp = max(0, self.player_hp - 20)
-                            self._save_game_state()
-                    else:
-                        # Saif was targeted: parry is skipped
-                        print("Saif took damage!")
-                        self.saif_hp = max(0, self.saif_hp - 20)
-                        self._save_game_state()
                             
                     # Check if either HP hits 0 to end battle
-                    if self.player_hp <= 0 or self.saif_hp <= 0:
+                    if self.player_hp <= 0 or (self.saif_recruited and self.saif_hp <= 0):
                         print("Battle Over! Defeat.")
                         self._reset_combat_only_state()
                         self.current_location = "overworld"
@@ -1096,6 +1290,113 @@ class Game:
                     else:
                         # Reset back to player's turn
                         self.combat_turn = 'player'
+                        self.menu_index = 0
+                        self.combat_mode = 'menu'
+                        
+                        # Decrement special cooldown
+                        if self.combo_cooldown > 0:
+                            self.combo_cooldown -= 1
+                            
+                        if self.saif_recruited:
+                            self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
+                        else:
+                            self.menu_options = ['Attack', 'Item', 'Flee']
+
+            # Player attack slide animation processing
+            if self.player_attack_active:
+                now = pygame.time.get_ticks()
+                elapsed = now - self.player_attack_start_time
+                duration = 600
+                half_duration = 300
+                start_x = self.player_combat_pos[0]
+                target_x = 540
+                
+                # Keep Y aligned
+                self.player_combat_current_pos[1] = self.player_combat_pos[1]
+                
+                # Slide logic
+                if elapsed < half_duration:
+                    t = elapsed / half_duration
+                    self.player_combat_current_pos[0] = start_x + (target_x - start_x) * t
+                elif elapsed < duration:
+                    t = (elapsed - half_duration) / half_duration
+                    self.player_combat_current_pos[0] = target_x - (target_x - start_x) * t
+                else:
+                    self.player_combat_current_pos[0] = self.player_combat_pos[0]
+                    self.player_attack_active = False
+                    
+                    if not self.is_combo_attack:
+                        if self.enemy_hp <= 0:
+                            self._end_battle_victory()
+                        else:
+                            self._end_current_turn()
+                    else:
+                        # Joint attack check
+                        if not self.saif_attack_active:
+                            if self.enemy_hp <= 0:
+                                self._end_battle_victory()
+                            else:
+                                self.is_combo_attack = False
+                                self._start_enemy_turn()
+
+                # Peak hit logic
+                if elapsed >= half_duration and not self.player_damage_dealt:
+                    self.player_damage_dealt = True
+                    if not self.is_combo_attack:
+                        # Player solo attack deals 20
+                        self._apply_damage_to_enemy(20, is_combo=False)
+                    else:
+                        if not self.combo_damage_applied:
+                            self.combo_damage_applied = True
+                            self._apply_damage_to_enemy(35, is_combo=True)
+
+            # Saif attack slide animation processing
+            if self.saif_attack_active:
+                now = pygame.time.get_ticks()
+                elapsed = now - self.saif_attack_start_time
+                duration = 600
+                half_duration = 300
+                start_x = self.saif_combat_pos[0]
+                target_x = 540
+                
+                # Keep Y aligned
+                self.saif_combat_current_pos[1] = self.saif_combat_pos[1]
+                
+                # Slide logic
+                if elapsed < half_duration:
+                    t = elapsed / half_duration
+                    self.saif_combat_current_pos[0] = start_x + (target_x - start_x) * t
+                elif elapsed < duration:
+                    t = (elapsed - half_duration) / half_duration
+                    self.saif_combat_current_pos[0] = target_x - (target_x - start_x) * t
+                else:
+                    self.saif_combat_current_pos[0] = self.saif_combat_pos[0]
+                    self.saif_attack_active = False
+                    
+                    if not self.is_combo_attack:
+                        if self.enemy_hp <= 0:
+                            self._end_battle_victory()
+                        else:
+                            self._end_current_turn()
+                    else:
+                        # Joint attack check
+                        if not self.player_attack_active:
+                            if self.enemy_hp <= 0:
+                                self._end_battle_victory()
+                            else:
+                                self.is_combo_attack = False
+                                self._start_enemy_turn()
+
+                # Peak hit logic
+                if elapsed >= half_duration and not self.saif_damage_dealt:
+                    self.saif_damage_dealt = True
+                    if not self.is_combo_attack:
+                        # Saif solo attack deals 15
+                        self._apply_damage_to_enemy(15, is_combo=False)
+                    else:
+                        if not self.combo_damage_applied:
+                            self.combo_damage_applied = True
+                            self._apply_damage_to_enemy(35, is_combo=True)
 
     def _render(self):
         """
@@ -1466,18 +1767,38 @@ class Game:
             
         elif self.state == 'combat_state':
             # 1. Draw Player (blue) and Enemy (red) and Saif (green, if recruited) in their combat layouts
-            # Player (Dodger Blue) static on the left
-            player_rect = pygame.Rect(self.player_combat_pos[0], self.player_combat_pos[1], self.player.size, self.player.size)
-            pygame.draw.rect(self.screen, self.player.color, player_rect)
+            # Player (Dodger Blue) animated on the left (with recoil offset if hit)
+            player_x_offset = -8 if self.player_recoil_frames > 0 else 0
+            if self.player_recoil_frames > 0:
+                self.player_recoil_frames -= 1
+                
+            player_rect = pygame.Rect(int(self.player_combat_current_pos[0]) + player_x_offset, int(self.player_combat_current_pos[1]), self.player.size, self.player.size)
+            if self.player_flash_frames > 0:
+                pygame.draw.rect(self.screen, (255, 255, 255), player_rect)
+                self.player_flash_frames -= 1
+            else:
+                pygame.draw.rect(self.screen, self.player.color, player_rect)
             
-            # Saif (Sea Green) static on the left next to player (only if recruited)
+            # Saif (Sea Green) animated on the left next to player (only if recruited)
             if self.saif_recruited:
-                saif_rect = pygame.Rect(self.saif_combat_pos[0], self.saif_combat_pos[1], self.player.size, self.player.size)
-                pygame.draw.rect(self.screen, (46, 139, 87), saif_rect)
+                saif_x_offset = -8 if self.saif_recoil_frames > 0 else 0
+                if self.saif_recoil_frames > 0:
+                    self.saif_recoil_frames -= 1
+                    
+                saif_rect = pygame.Rect(int(self.saif_combat_current_pos[0]) + saif_x_offset, int(self.saif_combat_current_pos[1]), self.player.size, self.player.size)
+                if self.saif_flash_frames > 0:
+                    pygame.draw.rect(self.screen, (255, 255, 255), saif_rect)
+                    self.saif_flash_frames -= 1
+                else:
+                    pygame.draw.rect(self.screen, (46, 139, 87), saif_rect)
             
-            # Enemy (Crimson Red) animated/static on the right
+            # Enemy (Crimson Red or White Flash) animated/static on the right
             enemy_rect = pygame.Rect(int(self.enemy_combat_current_pos[0]), int(self.enemy_combat_current_pos[1]), self.enemy.size, self.enemy.size)
-            pygame.draw.rect(self.screen, self.enemy.color, enemy_rect)
+            if self.enemy_flash_frames > 0:
+                pygame.draw.rect(self.screen, (255, 255, 255), enemy_rect)
+                self.enemy_flash_frames -= 1
+            else:
+                pygame.draw.rect(self.screen, self.enemy.color, enemy_rect)
             
             # Draw floating Crimson Red Enemy HP above the red square in upper arena
             enemy_x = int(self.enemy_combat_current_pos[0])
@@ -1504,15 +1825,16 @@ class Game:
             else:
                 for i, option in enumerate(self.menu_options):
                     y_pos = 425 + i * 35
-                    if self.combat_turn == 'player':
+                    if self.combat_mode == 'menu':
                         if i == self.menu_index:
                             self._draw_text(f"> {option}", 30, y_pos, (30, 144, 255))
                         else:
                             self._draw_text(option, 50, y_pos, (150, 150, 150))
                     else:
+                        # Grayed out because sub-menu is active
                         self._draw_text(option, 50, y_pos, (70, 70, 75))
             
-            # COLUMN 2: Chat Log / Dialogue Box (Center Box X: 250 to 540)
+            # COLUMN 2: Chat Log / Dialogue Box / Submenus (Center Box X: 250 to 540)
             if self.combat_mode == 'talk_input':
                 # Draw label prompt
                 self._draw_text("Ask Saif:", 270, 415, (200, 200, 210))
@@ -1559,6 +1881,36 @@ class Game:
                 # Draw dialogue lines
                 for idx, line in enumerate(lines[:4]):
                     self._draw_text(line, 270, 460 + idx * 28, (245, 245, 245))
+                    
+            elif self.combat_mode == 'special':
+                self._draw_text("SPECIAL MOVES", 270, 420, (238, 206, 112))
+                
+                # Check if Combo is available and not on cooldown
+                combo_text = "X-Strike (Combo)"
+                if not self.saif_recruited or self.saif_respect < 70:
+                    combo_text += " [Locked: 70+ Respect]"
+                    color = (100, 100, 110) # Grayed out
+                elif self.combo_cooldown > 0:
+                    combo_text += f" [Cooldown: {self.combo_cooldown} Turn{'s' if self.combo_cooldown > 1 else ''}]"
+                    color = (100, 100, 110) # Grayed out
+                else:
+                    color = (255, 215, 0) # Gold / Available
+                
+                self._draw_text(f"> {combo_text}", 270, 460, color)
+                self._draw_text("ESC: Back | ENTER: Execute", 270, 555, (150, 150, 150))
+                
+            elif self.combat_mode == 'item':
+                self._draw_text("INVENTORY", 270, 420, (238, 206, 112))
+                
+                potions = self.inventory.get("health_potion", 0)
+                item_text = f"Health Potion x{potions}"
+                if potions == 0:
+                    color = (100, 100, 110) # Grayed out
+                else:
+                    color = (245, 245, 245) # White / Available
+                
+                self._draw_text(f"> {item_text}", 270, 460, color)
+                self._draw_text("ESC: Back | ENTER: Use", 270, 555, (150, 150, 150))
             
             # COLUMN 3: Party HP & Respect Stats (Right Box X: 540 to 800)
             # Stats Header
@@ -1592,12 +1944,33 @@ class Game:
             # 3. Draw Top State Header Text with Dynamic Turn & Parry Warnings
             if self.combat_turn == 'player':
                 self._draw_text("PLAYER TURN", self.width // 2, 50, (30, 144, 255), center=True)
+            elif self.combat_turn == 'saif':
+                self._draw_text("SAIF TURN", self.width // 2, 50, (46, 139, 87), center=True)
             else:
                 if self.enemy_target == 'player':
                     self._draw_text("ENEMY TURN - PARRY NOW!", self.width // 2, 50, (220, 20, 60), center=True)
                 else:
                     self._draw_text("ENEMY TURN - TARGET: SAIF", self.width // 2, 50, (238, 206, 112), center=True)
+
+            # Render and update floating texts in the combat state
+            next_floating_texts = []
+            for ft in self.floating_texts:
+                self._draw_text(ft["text"], ft["x"], ft["y"], color=(238, 206, 112), center=True)
+                ft["y"] -= 1
+                ft["timer"] -= 1
+                if ft["timer"] > 0:
+                    next_floating_texts.append(ft)
+            self.floating_texts = next_floating_texts
         
+        # Screen Shake VFX: right before display flip, apply random X/Y offset
+        if self.screen_shake_frames > 0:
+            offset_x = random.randint(-5, 5)
+            offset_y = random.randint(-5, 5)
+            temp_surface = self.screen.copy()
+            self.screen.fill(self.bg_color)
+            self.screen.blit(temp_surface, (offset_x, offset_y))
+            self.screen_shake_frames -= 1
+
         # Update full display surface to screen
         pygame.display.flip()
 
