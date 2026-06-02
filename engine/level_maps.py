@@ -79,3 +79,6 @@ for r in range(50):
     else:
         CAMP_MAP_GRID.append([1] + [0] * 48 + [1])
 
+# Designate specific tile 4 as the campfire (Row 26, Col 24)
+CAMP_MAP_GRID[26][24] = 4
+

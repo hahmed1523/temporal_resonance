@@ -261,25 +261,17 @@ def extract_json_payload(raw_text: str) -> dict:
 # ── Prompt Construction ───────────────────────────────────────────────────────
 
 def _build_system_prompt(saif_respect: int, player_hp: int, enemy_hp: int,
-                         in_combat: bool) -> str:
+                         in_combat: bool, current_location: str = "overworld") -> str:
     """Build the character system prompt with dynamic game state injection."""
-    if in_combat:
-        context = (
-            f"You are Saif, an Arabian Desert Guardian. You are currently in battle. "
-            f"Your Respect for the player is {saif_respect}/100. "
-            f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
-            f"Factor these stats into your response. "
-        )
-    else:
-        context = (
-            f"You are Saif, an Arabian Desert Guardian. A stranger has approached you on the map. "
-            f"You are cautious but can be convinced to join them. "
-            f"Your Respect for them is {saif_respect}/100. "
-            f"Factor this stat into your response. "
-        )
+    if current_location == 'combat':
+        context = f"You are Saif, an Arabian Desert Guardian. You are currently in a deadly battle. Keep your words sharp, tactical, and focused on survival. Your respect for the player is {saif_respect}/100."
+    elif current_location == 'camp':
+        context = f"You are Saif, an Arabian Desert Guardian. You are currently resting safely at camp by a warm fire. The danger has passed. You are relaxed, reflective, and much more open to sharing deep lore, your history, and your personal thoughts. Your respect for the player is {saif_respect}/100."
+    else: # 'overworld'
+        context = f"You are Saif, an Arabian Desert Guardian. You are currently exploring the dangerous overworld. You are cautious and watching for ambushes. Your respect for the player is {saif_respect}/100."
 
     rules = (
-        "Respond in 1 or 2 short sentences, staying in character.\n\n"
+        "\n\nRespond in 1 or 2 short sentences, staying in character.\n\n"
         "RESPECT RULES (you MUST follow these exactly):\n"
         "- If the player speaks bravely, respectfully, appeals to honor/duty, "
         "or offers genuine help → respect_change: 10\n"
@@ -531,9 +523,10 @@ def generate_llm_response(player_text: str, game_state: dict) -> dict:
     enemy_hp = game_state.get("enemy_hp", 100)
     chat_history = game_state.get("chat_history", [])
     in_combat = game_state.get("in_combat", True)
+    current_location = game_state.get("current_location", "overworld")
 
     # ── Build prompts ─────────────────────────────────────────────────────
-    system_prompt = _build_system_prompt(saif_respect, player_hp, enemy_hp, in_combat)
+    system_prompt = _build_system_prompt(saif_respect, player_hp, enemy_hp, in_combat, current_location)
     user_prompt = _build_user_prompt(player_text, chat_history)
 
     # ── Provider dispatch ─────────────────────────────────────────────────

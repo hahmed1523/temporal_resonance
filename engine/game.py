@@ -249,6 +249,7 @@ class Game:
             "saif_hp": self.saif_hp,
             "chat_history": self.chat_history,
             "in_combat": in_combat,
+            "current_location": self.current_location,
             "llm_provider": self.llm_provider,
             "ollama_model": self.ollama_model,
             "ollama_url": self.ollama_url,
@@ -293,6 +294,7 @@ class Game:
         self.api_model = "gemini-2.5-flash"
         self.llm_think = True
         self.inventory = {"health_potion": 0}
+        self.current_location = "overworld"
         
         if os.path.exists(self.state_file_path):
             try:
@@ -312,6 +314,7 @@ class Game:
                     self.api_model = data.get("api_model", self.api_model)
                     self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
+                    self.current_location = data.get("current_location", "overworld")
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -331,6 +334,7 @@ class Game:
         self.saif_recruited = False
         self.chat_history = []
         self.inventory = {"health_potion": 0}
+        self.current_location = "overworld"
         
         # Load and preserve config keys from file if it exists
         if os.path.exists(self.state_file_path):
@@ -367,7 +371,8 @@ class Game:
             "api_base_url": self.api_base_url,
             "api_model": self.api_model,
             "llm_think": self.llm_think,
-            "inventory": self.inventory
+            "inventory": self.inventory,
+            "current_location": self.current_location
         }
         try:
             with open(self.state_file_path, 'w') as f:
@@ -398,7 +403,8 @@ class Game:
             "player_x": self.player.x,
             "player_y": self.player.y,
             "camera_x": self.camera_x,
-            "camera_y": self.camera_y
+            "camera_y": self.camera_y,
+            "current_location": self.current_location
         }
         try:
             with open(self.save_slot_file, 'w') as f:
@@ -433,6 +439,7 @@ class Game:
                     self.player.y = data.get("player_y", 1040)
                     self.camera_x = data.get("camera_x", 0.0)
                     self.camera_y = data.get("camera_y", 0.0)
+                    self.current_location = data.get("current_location", "overworld")
                 
                 # Align map grid tiles
                 if self.chest_opened and self.chest_x is not None:
@@ -513,6 +520,7 @@ class Game:
         
         # Recalculate camera centering for campsite
         self._update_camera()
+        self.current_location = "camp"
         self.state = 'camp_state'
         print("[System] Transitioned to large campsite map.")
 
@@ -526,6 +534,7 @@ class Game:
         self.camera_x = self.overworld_camera_x
         self.camera_y = self.overworld_camera_y
         
+        self.current_location = "overworld"
         self.state = 'exploration_state'
         print("[System] Returned to overworld.")
 
@@ -602,6 +611,17 @@ class Game:
             self._save_game_state()
             print("Party Rested!")
         elif event.key == pygame.K_e:
+            # Check interaction with campfire tile 4 in camp map coordinates
+            dist_x = abs(self.player.x - self.campfire_pos[0])
+            dist_y = abs(self.player.y - self.campfire_pos[1])
+            if dist_x <= 45 and dist_y <= 45:
+                self.player_hp = 100
+                self.saif_hp = 100
+                self.rest_notification_active = True
+                self._save_game_state()
+                print("The party rested at the fire. HP fully restored!")
+                return
+
             # Check interaction with Saif (only if recruited) in camp map coordinates
             if self.saif_recruited:
                 dist_x = abs(self.player.x - self.saif_camp_pos[0])
@@ -693,23 +713,25 @@ class Game:
             selection = self.main_menu_options[self.main_menu_index]
             
             if selection == "New Game":
-                from main import reset_game_state
-                reset_game_state() # Overwrites game_state.json with defaults
-                self._load_game_state() # Load defaults in memory
-                
-                # Reset physical map cells (close chest)
-                if self.chest_x is not None:
-                    c_idx = int(self.chest_x // self.tile_size)
-                    r_idx = int(self.chest_y // self.tile_size)
-                    self.map_grid[r_idx][c_idx] = 2
-                
-                self.player.x, self.player.y = 960, 1040 # Reset starting position
-                self.enemy_hp = 100
-                self.player_hp = 100
-                self.saif_hp = 100
-                self._update_camera()
-                self.state = 'exploration_state'
-                print("[System] Started New Game.")
+                    from main import reset_game_state
+                    reset_game_state() # Overwrites game_state.json with defaults
+                    self._load_game_state() # Load defaults in memory
+                    
+                    # Reset physical map cells (close chest)
+                    if self.chest_x is not None:
+                        c_idx = int(self.chest_x // self.tile_size)
+                        r_idx = int(self.chest_y // self.tile_size)
+                        self.map_grid[r_idx][c_idx] = 2
+                    
+                    self.map_grid = self.overworld_map_grid
+                    self.current_location = "overworld"
+                    self.player.x, self.player.y = 960, 1040 # Reset starting position
+                    self.enemy_hp = 100
+                    self.player_hp = 100
+                    self.saif_hp = 100
+                    self._update_camera()
+                    self.state = 'exploration_state'
+                    print("[System] Started New Game.")
             
             elif selection == "Continue":
                 if os.path.exists(self.save_slot_file):
@@ -878,6 +900,7 @@ class Game:
                 if self.enemy_hp <= 0:
                     print("Battle Over! Victory achieved.")
                     self._reset_combat_only_state()
+                    self.current_location = "overworld"
                     self.state = 'exploration_state'
                     self._knockback_player()
                 else:
@@ -906,6 +929,7 @@ class Game:
             elif selected_option == 'Flee':
                 print("Fled from battle!")
                 self._knockback_player()
+                self.current_location = "overworld"
                 self.state = 'exploration_state'
 
     def _handle_combat_talk_input(self, event):
@@ -980,6 +1004,7 @@ class Game:
             if self.state == 'exploration_state':
                 if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
                     self.state = 'combat_state'
+                    self.current_location = 'combat'
                     self.combat_mode = 'menu'
                     self.combat_turn = 'player'
                     self.menu_index = 0
@@ -1071,6 +1096,7 @@ class Game:
                     if self.player_hp <= 0 or self.saif_hp <= 0:
                         print("Battle Over! Defeat.")
                         self._reset_combat_only_state()
+                        self.current_location = "overworld"
                         self.state = 'exploration_state'
                         self._knockback_player()
                     else:
@@ -1145,6 +1171,12 @@ class Game:
                             wall_rect = pygame.Rect(screen_x, screen_y, tile_size, tile_size)
                             pygame.draw.rect(self.screen, wall_color, wall_rect)
                             pygame.draw.rect(self.screen, border_color, wall_rect, 1)
+                        elif cell == 4:
+                            # Draw solid Orange rectangle
+                            screen_x = c_idx * tile_size - self.camera_x
+                            screen_y = r_idx * tile_size - self.camera_y
+                            camp_rect = pygame.Rect(screen_x, screen_y, tile_size, tile_size)
+                            pygame.draw.rect(self.screen, (255, 140, 0), camp_rect)
                             
             # Draw a modern, subtle grid relative to camera offsets for smooth shifting movement
             self._draw_prototype_grid()
@@ -1198,6 +1230,12 @@ class Game:
                     pygame.draw.rect(self.screen, (218, 112, 214), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
                     
                 # 4. Interaction Prompts
+                # Adjacent to campfire?
+                dist_x = abs(self.player.x - self.campfire_pos[0])
+                dist_y = abs(self.player.y - self.campfire_pos[1])
+                if dist_x <= 45 and dist_y <= 45:
+                    self._draw_text("Press E to rest at fire", self.width // 2, 80, (255, 140, 0), center=True)
+
                 # Adjacent to Saif?
                 if self.saif_recruited:
                     dist_x = abs(self.player.x - self.saif_camp_pos[0])
@@ -1235,7 +1273,7 @@ class Game:
                     self._draw_text(f"Potions: {self.inventory.get('health_potion', 0)}", 130, 545, (238, 206, 112))
                     
                     if self.rest_notification_active:
-                        self._draw_text("Party Rested! HP Restored.", 480, 455, (46, 139, 87))
+                        self._draw_text("The party rested at the fire. HP fully restored!", 350, 455, (46, 139, 87))
             
             # Draw Centered Peaceful Conversation Panel (only in dialogue_state)
             if self.state == 'dialogue_state':
