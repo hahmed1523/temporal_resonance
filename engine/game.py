@@ -1150,13 +1150,13 @@ class Game:
             self._draw_prototype_grid()
             
             # Render Saif NPC on overworld if not recruited (only in overworld!)
-            if self.state != 'camp_state' and not self.saif_recruited and self.saif_npc_x is not None:
+            if self.map_grid != self.camp_map_grid and not self.saif_recruited and self.saif_npc_x is not None:
                 screen_x = self.saif_npc_x - self.camera_x
                 screen_y = self.saif_npc_y - self.camera_y
                 pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
             
             # Render game entities with camera offsets (only in overworld!)
-            if self.state != 'camp_state':
+            if self.map_grid != self.camp_map_grid:
                 self.enemy.draw(self.screen, self.camera_x, self.camera_y)
                 if self.chest_x is not None:
                     c_idx = int(self.chest_x // self.tile_size)
@@ -1165,8 +1165,8 @@ class Game:
                         self.chest.draw(self.screen, self.camera_x, self.camera_y)
             self.player.draw(self.screen, self.camera_x, self.camera_y)
             
-            # Render Camp entities if in camp_state
-            if self.state == 'camp_state':
+            # Render Camp entities if in camp map grid
+            if self.map_grid == self.camp_map_grid:
                 # 1. Flickering Campfire at self.campfire_pos (960, 1040)
                 screen_x = self.campfire_pos[0] - self.camera_x
                 screen_y = self.campfire_pos[1] - self.camera_y
