@@ -996,19 +996,28 @@ class Game:
         elif self.state == 'dialogue_state' and self.combat_mode == 'talk_response':
             now = pygame.time.get_ticks()
             if now - self.talk_response_start_time >= 4000:
-                # Resolve dialogue and check if Saif recruitment criteria is met
-                if self.saif_respect >= 70:
-                    print("Saif joined the party!")
-                    self.saif_recruited = True
-                    self._save_game_state()
+                if self.saif_recruited:
+                    # Already recruited! Just return to camp/exploration map
                     if self.active_camp_npc == 'saif':
                         self.state = 'camp_state'
                     else:
                         self.state = 'exploration_state'
                     self.combat_mode = 'menu'
                 else:
-                    self.combat_mode = 'talk_input'
-                    self.chat_input_text = ""
+                    # Not recruited yet! Check if respect meets threshold
+                    if self.saif_respect >= 70:
+                        print("Saif joined the party!")
+                        self.saif_recruited = True
+                        self._save_game_state()
+                        if self.active_camp_npc == 'saif':
+                            self.state = 'camp_state'
+                        else:
+                            self.state = 'exploration_state'
+                        self.combat_mode = 'menu'
+                    else:
+                        # Keep chatting until respect meets 70
+                        self.combat_mode = 'talk_input'
+                        self.chat_input_text = ""
                 
         # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
