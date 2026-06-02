@@ -75,6 +75,13 @@ def main():
     """
     Main entry point for starting the game prototype.
     """
+    # Pre-initialize pygame mixer with 44.1kHz stereo and a larger 4096-byte buffer
+    # to prevent buffer underruns and scratchy/crackling audio playback.
+    try:
+        pygame.mixer.pre_init(44100, -16, 2, 4096)
+    except Exception as e:
+        print(f"[Warning] Failed to pre-initialize pygame mixer: {e}")
+
     # Initialize Pygame and the Mixer
     pygame.init()
     try:

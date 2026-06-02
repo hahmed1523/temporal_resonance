@@ -22,6 +22,11 @@ class Game:
         """
         Initializes Pygame, sets up the screen, game clock, and game entities.
         """
+        try:
+            pygame.mixer.pre_init(44100, -16, 2, 4096)
+        except Exception as e:
+            print(f"[Warning] Failed to pre-initialize pygame mixer in Game: {e}")
+            
         pygame.init()
         try:
             pygame.mixer.init()
