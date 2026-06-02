@@ -9,7 +9,7 @@ from engine.enemy import Enemy
 from engine.chest import Chest
 
 from engine.llm_handler import generate_llm_response, save_api_key_to_env
-from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE
+from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE, CAMP_MAP_GRID
 
 class Game:
     """
@@ -29,7 +29,9 @@ class Game:
         pygame.display.set_caption(title)
         
         # Load level map grid
-        self.map_grid = map_grid if map_grid is not None else DEFAULT_MAP_GRID
+        self.overworld_map_grid = map_grid if map_grid is not None else DEFAULT_MAP_GRID
+        self.camp_map_grid = CAMP_MAP_GRID
+        self.map_grid = self.overworld_map_grid
         
         # Game loop control and clock
         self.clock = pygame.time.Clock()
@@ -47,6 +49,21 @@ class Game:
         self.state_file_path = os.path.join("data", "game_state.json")
         self.save_slot_file = "save_slot_1.json"
         self._load_game_state()
+        
+        # Track overworld position & camera variables for camp pack-up
+        self.overworld_player_x = 960
+        self.overworld_player_y = 1040
+        self.overworld_camera_x = 0.0
+        self.overworld_camera_y = 0.0
+        
+        # Camp interactive entities and coordinates in 50x50 camp space
+        self.campfire_pos = (960, 1040)
+        self.saif_camp_pos = (880, 1040)
+        self.elena_camp_pos = (1040, 1040)
+        
+        # Camp dialogue state
+        self.active_camp_npc = None # 'saif' or 'elena'
+        self.elena_dialogue_active = False
         
         # Initialize Game State
         self.state = 'main_menu_state'
@@ -475,6 +492,43 @@ class Game:
                 
         self._save_game_state()
 
+    def _transition_to_camp(self):
+        """Saves overworld state and transitions player into the 2D Camp Map."""
+        self.overworld_player_x = self.player.x
+        self.overworld_player_y = self.player.y
+        self.overworld_camera_x = self.camera_x
+        self.overworld_camera_y = self.camera_y
+        
+        # Switch map representation to Camp Map (50x50)
+        self.map_grid = self.camp_map_grid
+        
+        # Reset rest notification flag
+        self.rest_notification_active = False
+        self.elena_dialogue_active = False
+        self.active_camp_npc = None
+        
+        # Spawn player below the campfire facing it
+        self.player.x = 960
+        self.player.y = 1160
+        
+        # Recalculate camera centering for campsite
+        self._update_camera()
+        self.state = 'camp_state'
+        print("[System] Transitioned to large campsite map.")
+
+    def _transition_to_overworld(self):
+        """Restores player position and camera and transitions back to Overworld."""
+        self.map_grid = self.overworld_map_grid
+        
+        # Restore coordinates and camera offset
+        self.player.x = self.overworld_player_x
+        self.player.y = self.overworld_player_y
+        self.camera_x = self.overworld_camera_x
+        self.camera_y = self.overworld_camera_y
+        
+        self.state = 'exploration_state'
+        print("[System] Returned to overworld.")
+
     def run(self):
         """
         Starts and coordinates the core game loop.
@@ -525,15 +579,49 @@ class Game:
     # ── State-specific event handlers ────────────────────────────────────
 
     def _handle_camp_events(self, event):
-        """Handles KEYDOWN events while in the camp/rest screen."""
+        """Handles KEYDOWN events while in the active 2D Camp Map."""
+        if self.elena_dialogue_active:
+            if event.key == pygame.K_ESCAPE:
+                self.elena_dialogue_active = False
+                self.active_camp_npc = None
+            elif event.key == pygame.K_h:
+                # Elena cooks and gifts a Health Potion!
+                self.inventory["health_potion"] = self.inventory.get("health_potion", 0) + 1
+                self._save_game_state()
+                print("[Elena] Cooking Potion! Gifted to player.")
+                self.elena_dialogue_active = False
+                self.active_camp_npc = None
+            return
+
         if event.key == pygame.K_ESCAPE:
-            self.state = 'exploration_state'
+            self._transition_to_overworld()
         elif event.key == pygame.K_r:
             self.player_hp = 100
             self.saif_hp = 100
             self.rest_notification_active = True
             self._save_game_state()
             print("Party Rested!")
+        elif event.key == pygame.K_e:
+            # Check interaction with Saif (only if recruited) in camp map coordinates
+            if self.saif_recruited:
+                dist_x = abs(self.player.x - self.saif_camp_pos[0])
+                dist_y = abs(self.player.y - self.saif_camp_pos[1])
+                if dist_x <= 45 and dist_y <= 45:
+                    self.state = 'dialogue_state'
+                    self.combat_mode = 'talk_input'
+                    self.active_camp_npc = 'saif'
+                    self.chat_input_text = ""
+                    self.talk_response_text = ""
+                    print("[System] Entered dialogue with Saif at camp.")
+                    return
+
+            # Check interaction with Elena in camp map coordinates
+            dist_x = abs(self.player.x - self.elena_camp_pos[0])
+            dist_y = abs(self.player.y - self.elena_camp_pos[1])
+            if dist_x <= 45 and dist_y <= 45:
+                self.elena_dialogue_active = True
+                self.active_camp_npc = 'elena'
+                print("[System] Interacted with Elena.")
 
     def _handle_exploration_events(self, event):
         """Handles KEYDOWN events while exploring the overworld."""
@@ -542,9 +630,7 @@ class Game:
             self.pause_menu_index = 0
             self.save_confirmed_time = 0
         elif event.key == pygame.K_c:
-            self.state = 'camp_state'
-            self.rest_notification_active = False
-            self._load_game_state()
+            self._transition_to_camp()
         elif event.key == pygame.K_e:
             # 1. Check adjacency to Saif NPC in world space (adjacent is <= 45px distance)
             if not self.saif_recruited and self.saif_npc_x is not None:
@@ -705,9 +791,12 @@ class Game:
                     self.settings_edit_buffer = ""
 
     def _handle_dialogue_events(self, event):
-        """Handles KEYDOWN events during peaceful overworld dialogue with Saif."""
+        """Handles KEYDOWN events during peaceful dialogue with Saif."""
         if event.key == pygame.K_ESCAPE:
-            self.state = 'exploration_state'
+            if self.active_camp_npc == 'saif':
+                self.state = 'camp_state'
+            else:
+                self.state = 'exploration_state'
             self.combat_mode = 'menu'
             print("[System] Left dialogue early.")
         elif self.combat_mode == 'talk_input':
@@ -877,25 +966,28 @@ class Game:
         """
         Updates the state of all active game entities.
         """
-        # Only allow movement/updates when in exploration state
-        if self.state == 'exploration_state':
+        # Allow movement/updates in both exploration and camp states
+        if self.state in ('exploration_state', 'camp_state'):
             # Fetch the current state of all keyboard buttons
             keys = pygame.key.get_pressed()
             
-            # Update the player entity using the key states, delta time, and level map (pass saif_recruited status)
-            self.player.handle_input(keys, dt, self.world_width, self.world_height, self.map_grid, self.saif_recruited)
+            saif_rec_check = self.saif_recruited if self.state == 'exploration_state' else False
             
-            # Check collision with the static enemy
-            if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
-                self.state = 'combat_state'
-                self.combat_mode = 'menu'
-                self.combat_turn = 'player'
-                self.menu_index = 0
-                if self.saif_recruited:
-                    self.menu_options = ['Attack', 'Talk', 'Item', 'Flee']
-                else:
-                    self.menu_options = ['Attack', 'Item', 'Flee']
-                print("Battle Started!")
+            # Update player movement
+            self.player.handle_input(keys, dt, self.world_width, self.world_height, self.map_grid, saif_rec_check)
+            
+            # Check collision with overworld enemy only in exploration state
+            if self.state == 'exploration_state':
+                if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
+                    self.state = 'combat_state'
+                    self.combat_mode = 'menu'
+                    self.combat_turn = 'player'
+                    self.menu_index = 0
+                    if self.saif_recruited:
+                        self.menu_options = ['Attack', 'Talk', 'Item', 'Flee']
+                    else:
+                        self.menu_options = ['Attack', 'Item', 'Flee']
+                    print("Battle Started!")
                 
             # Keep camera centered on player
             self._update_camera()
@@ -909,7 +1001,10 @@ class Game:
                     print("Saif joined the party!")
                     self.saif_recruited = True
                     self._save_game_state()
-                    self.state = 'exploration_state'
+                    if self.active_camp_npc == 'saif':
+                        self.state = 'camp_state'
+                    else:
+                        self.state = 'exploration_state'
                     self.combat_mode = 'menu'
                 else:
                     self.combat_mode = 'talk_input'
@@ -1017,7 +1112,7 @@ class Game:
             # Version/Info
             self._draw_text("Use UP/DOWN to navigate | ENTER to select", self.width // 2, 550, (100, 100, 110), center=True)
             
-        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state'):
+        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state'):
             # Render solid grey walls from map grid first with frustum culling
             if self.map_grid:
                 tile_size = self.tile_size
@@ -1045,20 +1140,93 @@ class Game:
             # Draw a modern, subtle grid relative to camera offsets for smooth shifting movement
             self._draw_prototype_grid()
             
-            # Render Saif NPC on overworld if not recruited
-            if not self.saif_recruited and self.saif_npc_x is not None:
+            # Render Saif NPC on overworld if not recruited (only in overworld!)
+            if self.state != 'camp_state' and not self.saif_recruited and self.saif_npc_x is not None:
                 screen_x = self.saif_npc_x - self.camera_x
                 screen_y = self.saif_npc_y - self.camera_y
                 pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
             
-            # Render game entities with camera offsets
-            self.enemy.draw(self.screen, self.camera_x, self.camera_y)
-            if self.chest_x is not None:
-                c_idx = int(self.chest_x // self.tile_size)
-                r_idx = int(self.chest_y // self.tile_size)
-                if self.map_grid[r_idx][c_idx] == 2:
-                    self.chest.draw(self.screen, self.camera_x, self.camera_y)
+            # Render game entities with camera offsets (only in overworld!)
+            if self.state != 'camp_state':
+                self.enemy.draw(self.screen, self.camera_x, self.camera_y)
+                if self.chest_x is not None:
+                    c_idx = int(self.chest_x // self.tile_size)
+                    r_idx = int(self.chest_y // self.tile_size)
+                    if self.map_grid[r_idx][c_idx] == 2:
+                        self.chest.draw(self.screen, self.camera_x, self.camera_y)
             self.player.draw(self.screen, self.camera_x, self.camera_y)
+            
+            # Render Camp entities if in camp_state
+            if self.state == 'camp_state':
+                # 1. Flickering Campfire at self.campfire_pos (960, 1040)
+                screen_x = self.campfire_pos[0] - self.camera_x
+                screen_y = self.campfire_pos[1] - self.camera_y
+                if -40 <= screen_x <= self.width and -40 <= screen_y <= self.height:
+                    # Draw overlapping logs
+                    pygame.draw.rect(self.screen, (101, 67, 33), pygame.Rect(screen_x + 5, screen_y + 15, 30, 10))
+                    pygame.draw.rect(self.screen, (101, 67, 33), pygame.Rect(screen_x + 15, screen_y + 5, 10, 30))
+                    
+                    # Flickering animation using sine wave
+                    import math
+                    flicker = int(math.sin(pygame.time.get_ticks() / 80) * 4)
+                    # Outer red/orange glow
+                    pygame.draw.circle(self.screen, (255, 69, 0), (screen_x + 20, screen_y + 20), 18 + flicker)
+                    # Inner flame core
+                    pygame.draw.circle(self.screen, (255, 165, 0), (screen_x + 20, screen_y + 20), 11 + flicker // 2)
+                    pygame.draw.circle(self.screen, (255, 215, 0), (screen_x + 20, screen_y + 20), 6)
+                    
+                # 2. Saif at self.saif_camp_pos (880, 1040) - only if recruited!
+                if self.saif_recruited:
+                    screen_x = self.saif_camp_pos[0] - self.camera_x
+                    screen_y = self.saif_camp_pos[1] - self.camera_y
+                    if -40 <= screen_x <= self.width and -40 <= screen_y <= self.height:
+                        pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
+                        
+                # 3. Elena the Chef at self.elena_camp_pos (1040, 1040)
+                screen_x = self.elena_camp_pos[0] - self.camera_x
+                screen_y = self.elena_camp_pos[1] - self.camera_y
+                if -40 <= screen_x <= self.width and -40 <= screen_y <= self.height:
+                    pygame.draw.rect(self.screen, (218, 112, 214), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
+                    
+                # 4. Interaction Prompts
+                # Adjacent to Saif?
+                if self.saif_recruited:
+                    dist_x = abs(self.player.x - self.saif_camp_pos[0])
+                    dist_y = abs(self.player.y - self.saif_camp_pos[1])
+                    if dist_x <= 45 and dist_y <= 45:
+                        self._draw_text("Press E to talk to Saif", self.width // 2, 80, (238, 206, 112), center=True)
+                
+                # Adjacent to Elena?
+                dist_x = abs(self.player.x - self.elena_camp_pos[0])
+                dist_y = abs(self.player.y - self.elena_camp_pos[1])
+                if dist_x <= 45 and dist_y <= 45:
+                    self._draw_text("Press E to talk to Elena", self.width // 2, 80, (238, 206, 112), center=True)
+                    
+                # 5. Elena's dialogue card overlay
+                if self.elena_dialogue_active:
+                    pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(150, 420, 500, 160))
+                    pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(150, 420, 500, 160), 2)
+                    self._draw_text("Elena (Camp Chef):", 170, 435, (218, 112, 214))
+                    self._draw_text("Welcome to our cozy fire! Would you like a warm stew,", 170, 470, (245, 245, 245))
+                    self._draw_text("or some freshly brewed Health Potion? Press H!", 170, 495, (245, 245, 245))
+                    self._draw_text("ESC: Close | H: Take Potion", 170, 545, (150, 150, 150))
+                    
+                # 6. Campsite bottom HUD
+                elif not self.elena_dialogue_active:
+                    pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(100, 440, 600, 140))
+                    pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(100, 440, 600, 140), 2)
+                    
+                    self._draw_text("CAMPFIRE COGNIZANCE HUD", 130, 455, (238, 206, 112))
+                    self._draw_text("Press R to Rest & Heal | ESC to pack up & pack out", 130, 490, (245, 245, 245))
+                    
+                    hp_status = f"Player HP: {self.player_hp}/100"
+                    if self.saif_recruited:
+                        hp_status += f"  |  Saif HP: {self.saif_hp}/100 (Respect: {self.saif_respect}/100)"
+                    self._draw_text(hp_status, 130, 520, (30, 144, 255))
+                    self._draw_text(f"Potions: {self.inventory.get('health_potion', 0)}", 130, 545, (238, 206, 112))
+                    
+                    if self.rest_notification_active:
+                        self._draw_text("Party Rested! HP Restored.", 480, 455, (46, 139, 87))
             
             # Draw Centered Peaceful Conversation Panel (only in dialogue_state)
             if self.state == 'dialogue_state':
@@ -1253,40 +1421,7 @@ class Game:
             else:
                 self._draw_text("UP/DOWN: Navigate | ENTER: Select | ESC: Back to Game", 400, 520, (150, 150, 155), center=True)
         
-        elif self.state == 'camp_state':
-            # Draw a sleek camp screen UI
-            # 1. Clean visual border box
-            pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(50, 50, 700, 500))
-            pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(50, 50, 700, 500), 2)
-            
-            # 2. Header
-            self._draw_text("CAMPFIRE COGNIZANCE", 400, 90, (238, 206, 112), center=True)
-            pygame.draw.line(self.screen, self.grid_color, (100, 125), (700, 125), 1)
-            
-            # 3. Party Status Checklist
-            self._draw_text("PARTY STATUS:", 100, 160, (200, 200, 210))
-            
-            self._draw_text(f"- Player HP: {self.player_hp}/100", 120, 210, (30, 144, 255))
-            
-            if self.saif_recruited:
-                self._draw_text(f"- Saif (Traumatized Guardian):", 120, 260, (238, 206, 112))
-                self._draw_text(f"  HP: {self.saif_hp}/100 | Respect Meter: {self.saif_respect}/100", 120, 290, (180, 180, 185))
-                if self.saif_respect <= 20:
-                    self._draw_text("  !!! FINAL WARNING: Saif is on the verge of defection (<= 20 respect) !!!", 120, 315, (220, 20, 60))
-            else:
-                self._draw_text("- Saif (Not recruited yet)", 120, 260, (120, 120, 125))
-            
-            self._draw_text(f"- Target Enemy HP: {self.enemy_hp}/100", 120, 350, (220, 20, 60))
-            
-            pygame.draw.line(self.screen, self.grid_color, (100, 400), (700, 400), 1)
-            
-            # 4. Commands Box
-            self._draw_text("Press R to Rest (Restores HP to 100)", 400, 440, (255, 255, 255), center=True)
-            self._draw_text("Press ESC to return to the map", 400, 480, (150, 150, 150), center=True)
-            
-            # 5. Rest Confirmation notification
-            if self.rest_notification_active:
-                self._draw_text("Party Rested! HP Restored.", 400, 520, (46, 139, 87), center=True)
+        # Static camp_state renderer removed because camp is now fully 2D and dynamic.
             
         elif self.state == 'combat_state':
             # 1. Draw Player (blue) and Enemy (red) and Saif (green, if recruited) in their combat layouts
