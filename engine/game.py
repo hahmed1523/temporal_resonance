@@ -604,12 +604,6 @@ class Game:
 
         if event.key == pygame.K_ESCAPE:
             self._transition_to_overworld()
-        elif event.key == pygame.K_r:
-            self.player_hp = 100
-            self.saif_hp = 100
-            self.rest_notification_active = True
-            self._save_game_state()
-            print("Party Rested!")
         elif event.key == pygame.K_e:
             # Check interaction with campfire tile 4 in camp map coordinates
             dist_x = abs(self.player.x - self.campfire_pos[0])
@@ -1264,7 +1258,7 @@ class Game:
                     pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(100, 440, 600, 140), 2)
                     
                     self._draw_text("CAMPFIRE COGNIZANCE HUD", 130, 455, (238, 206, 112))
-                    self._draw_text("Press R to Rest & Heal | ESC to pack up & pack out", 130, 490, (245, 245, 245))
+                    self._draw_text("Stand adjacent to fire and press E to Rest | ESC to pack up", 130, 490, (245, 245, 245))
                     
                     hp_status = f"Player HP: {self.player_hp}/100"
                     if self.saif_recruited:
