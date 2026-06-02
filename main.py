@@ -21,9 +21,12 @@ def reset_game_state():
     state_file = os.path.join(state_dir, "game_state.json")
     
     # Configuration defaults
-    llm_provider = "gemini"
+    llm_provider = "ollama"
     ollama_model = "gemma4:e4b"
     ollama_url = "http://localhost:11434"
+    api_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    api_model = "gemini-2.5-flash"
+    llm_think = True
     
     # Try to load existing configuration keys
     if os.path.exists(state_file):
@@ -33,6 +36,9 @@ def reset_game_state():
                 llm_provider = existing_data.get("llm_provider", llm_provider)
                 ollama_model = existing_data.get("ollama_model", ollama_model)
                 ollama_url = existing_data.get("ollama_url", ollama_url)
+                api_base_url = existing_data.get("api_base_url", api_base_url)
+                api_model = existing_data.get("api_model", api_model)
+                llm_think = existing_data.get("llm_think", llm_think)
         except Exception:
             pass  # Fall back to defaults if file is corrupted
             
@@ -47,6 +53,9 @@ def reset_game_state():
         "llm_provider": llm_provider,
         "ollama_model": ollama_model,
         "ollama_url": ollama_url,
+        "api_base_url": api_base_url,
+        "api_model": api_model,
+        "llm_think": llm_think,
         "inventory": {"health_potion": 0}
     }
     with open(state_file, "w") as f:
@@ -57,9 +66,6 @@ def main():
     """
     Main entry point for starting the game prototype.
     """
-    # Reset external state to defaults before starting the game
-    reset_game_state()
-    
     # Create the game manager instance using our level map grid
     game = Game(
         width=800,

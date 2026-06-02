@@ -9,6 +9,18 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Environment / Secrets
+.env
+.env.*
+*.env
+
+# Game Runtime State (contains chat history, config)
+data/game_state.json
+
+# IDE
+.idea/
+.vscode/
+
 # OS Specific
 .DS_Store
 Thumbs.db

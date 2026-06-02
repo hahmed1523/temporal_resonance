@@ -8,7 +8,7 @@ from engine.player import Player
 from engine.enemy import Enemy
 from engine.chest import Chest
 
-from engine.llm_handler import generate_llm_response
+from engine.llm_handler import generate_llm_response, save_api_key_to_env
 from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE
 
 class Game:
@@ -48,7 +48,16 @@ class Game:
         self._load_game_state()
         
         # Initialize Game State
-        self.state = 'exploration_state'  # States: 'exploration_state', 'combat_state'
+        self.state = 'main_menu_state'
+        
+        # Main Menu State Variables
+        self.main_menu_index = 0
+        self.main_menu_options = ["New Game", "Continue", "Settings", "Quit"]
+        self.save_exists = os.path.exists(self.state_file_path)
+        if not self.save_exists:
+            self.main_menu_index = 0  # Default to New Game if no save
+        else:
+            self.main_menu_index = 1  # Default to Continue if save exists
         
         # World map boundaries (grid is 50 rows × 50 cols, each tile is 40×40 px)
         self.tile_size = TILE_SIZE
@@ -132,6 +141,13 @@ class Game:
         
         # Camp Mode State Variables
         self.rest_notification_active = False
+        
+        # Settings Screen State Variables
+        self.settings_field_index = 0  # Which setting is currently selected
+        self.settings_fields = ['provider', 'model', 'api_key', 'think']
+        self.settings_editing = False   # True when user is typing into a field
+        self.settings_edit_buffer = ""  # Temp buffer for text input in settings
+        self.settings_api_key_display = ""  # Masked display of API key
 
     def _adjust_respect(self, change: int):
         """
@@ -211,7 +227,10 @@ class Game:
             "in_combat": in_combat,
             "llm_provider": self.llm_provider,
             "ollama_model": self.ollama_model,
-            "ollama_url": self.ollama_url
+            "ollama_url": self.ollama_url,
+            "api_base_url": self.api_base_url,
+            "api_model": self.api_model,
+            "llm_think": self.llm_think
         }
         res_dict = generate_llm_response(self.chat_input_text, game_state)
         dialogue = res_dict.get("dialogue", "Saif remains silent.")
@@ -243,9 +262,12 @@ class Game:
         self.chat_history = []
         self.chest_opened = False
         self.saif_recruited = False
-        self.llm_provider = "gemini"
+        self.llm_provider = "ollama"
         self.ollama_model = "gemma4:e4b"
         self.ollama_url = "http://localhost:11434"
+        self.api_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+        self.api_model = "gemini-2.5-flash"
+        self.llm_think = True
         self.inventory = {"health_potion": 0}
         
         if os.path.exists(self.state_file_path):
@@ -262,6 +284,9 @@ class Game:
                     self.llm_provider = data.get("llm_provider", self.llm_provider)
                     self.ollama_model = data.get("ollama_model", self.ollama_model)
                     self.ollama_url = data.get("ollama_url", self.ollama_url)
+                    self.api_base_url = data.get("api_base_url", self.api_base_url)
+                    self.api_model = data.get("api_model", self.api_model)
+                    self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
@@ -291,6 +316,9 @@ class Game:
                     self.llm_provider = data.get("llm_provider", self.llm_provider)
                     self.ollama_model = data.get("ollama_model", self.ollama_model)
                     self.ollama_url = data.get("ollama_url", self.ollama_url)
+                    self.api_base_url = data.get("api_base_url", self.api_base_url)
+                    self.api_model = data.get("api_model", self.api_model)
+                    self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
             except Exception:
                 pass
@@ -312,6 +340,9 @@ class Game:
             "llm_provider": self.llm_provider,
             "ollama_model": self.ollama_model,
             "ollama_url": self.ollama_url,
+            "api_base_url": self.api_base_url,
+            "api_model": self.api_model,
+            "llm_think": self.llm_think,
             "inventory": self.inventory
         }
         try:
@@ -394,8 +425,12 @@ class Game:
             if event.type == pygame.QUIT:
                 self.is_running = False
             elif event.type == pygame.KEYDOWN:
-                if self.state == 'camp_state':
+                if self.state == 'main_menu_state':
+                    self._handle_main_menu_events(event)
+                elif self.state == 'camp_state':
                     self._handle_camp_events(event)
+                elif self.state == 'settings_state':
+                    self._handle_settings_events(event)
                 elif self.state == 'exploration_state':
                     self._handle_exploration_events(event)
                 elif self.state == 'dialogue_state':
@@ -419,7 +454,10 @@ class Game:
     def _handle_exploration_events(self, event):
         """Handles KEYDOWN events while exploring the overworld."""
         if event.key == pygame.K_ESCAPE:
-            self.is_running = False
+            self.state = 'main_menu_state'
+            # Refresh save status when returning to menu
+            self.save_exists = os.path.exists(self.state_file_path)
+            self.main_menu_index = 1 if self.save_exists else 0
         elif event.key == pygame.K_c:
             self.state = 'camp_state'
             self.rest_notification_active = False
@@ -451,6 +489,101 @@ class Game:
                         self.inventory["health_potion"] = self.inventory.get("health_potion", 0) + 1
                         self._save_game_state()
                         print("Found a Health Potion!")
+
+    def _handle_main_menu_events(self, event):
+        """Handles KEYDOWN events on the Main Menu."""
+        if event.key == pygame.K_UP:
+            self.main_menu_index = (self.main_menu_index - 1) % len(self.main_menu_options)
+        elif event.key == pygame.K_DOWN:
+            self.main_menu_index = (self.main_menu_index + 1) % len(self.main_menu_options)
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            selection = self.main_menu_options[self.main_menu_index]
+            
+            if selection == "New Game":
+                self._reset_state_to_default() # Wipe runtime state, keep config
+                self.state = 'exploration_state'
+                self.player.x, self.player.y = 400, 300 # Reset positions
+                self.camera_x, self.camera_y = 0, 0
+                print("[System] Started New Game.")
+            
+            elif selection == "Continue":
+                if self.save_exists:
+                    self._load_game_state()
+                    self.state = 'exploration_state'
+                    print("[System] Continued saved game.")
+                else:
+                    print("[System] No save file found.")
+                    
+            elif selection == "Settings":
+                self.state = 'settings_state'
+                self.settings_field_index = 0
+                self.settings_editing = False
+                self.settings_edit_buffer = ""
+                # Prepare masked API key display
+                api_key = os.environ.get("API_KEY", "")
+                if api_key:
+                    self.settings_api_key_display = "*" * 8 + api_key[-4:]
+                else:
+                    self.settings_api_key_display = "(not set)"
+                print("[System] Opened LLM Settings from Main Menu.")
+                
+            elif selection == "Quit":
+                self.is_running = False
+
+    def _handle_settings_events(self, event):
+        """Handles KEYDOWN events while in the LLM Settings screen."""
+        if self.settings_editing:
+            # User is typing into a text field
+            if event.key == pygame.K_ESCAPE:
+                self.settings_editing = False
+                self.settings_edit_buffer = ""
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                # Commit the edit
+                field = self.settings_fields[self.settings_field_index]
+                value = self.settings_edit_buffer.strip()
+                if field == 'model' and value:
+                    if self.llm_provider == 'ollama':
+                        self.ollama_model = value
+                    else:
+                        self.api_model = value
+                    self._save_game_state()
+                    print(f"[Settings] Model set to: {value}")
+                elif field == 'api_key' and value:
+                    save_api_key_to_env(value)
+                    self.settings_api_key_display = "*" * 8 + value[-4:]
+                    print("[Settings] API key saved securely.")
+                self.settings_editing = False
+                self.settings_edit_buffer = ""
+            elif event.key == pygame.K_BACKSPACE:
+                self.settings_edit_buffer = self.settings_edit_buffer[:-1]
+            else:
+                if event.unicode and ord(event.unicode) >= 32 and len(self.settings_edit_buffer) < 80:
+                    self.settings_edit_buffer += event.unicode
+        else:
+            # Navigation mode
+            if event.key == pygame.K_ESCAPE:
+                self.state = 'main_menu_state'
+                print("[System] Closed LLM Settings.")
+            elif event.key == pygame.K_UP:
+                self.settings_field_index = (self.settings_field_index - 1) % len(self.settings_fields)
+            elif event.key == pygame.K_DOWN:
+                self.settings_field_index = (self.settings_field_index + 1) % len(self.settings_fields)
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                field = self.settings_fields[self.settings_field_index]
+                if field == 'provider':
+                    # Toggle between 'ollama' and 'api'
+                    self.llm_provider = 'api' if self.llm_provider == 'ollama' else 'ollama'
+                    self._save_game_state()
+                    print(f"[Settings] Provider switched to: {self.llm_provider.upper()}")
+                elif field == 'think':
+                    # Toggle thinking on/off
+                    self.llm_think = not self.llm_think
+                    self._save_game_state()
+                    print(f"[Settings] Thinking set to: {self.llm_think}")
+                elif field in ('model', 'api_key'):
+                    # Enter text edit mode
+                    self.settings_editing = True
+                    self.settings_edit_buffer = ""
 
     def _handle_dialogue_events(self, event):
         """Handles KEYDOWN events during peaceful overworld dialogue with Saif."""
@@ -728,7 +861,46 @@ class Game:
         # Clear screen with dark mode background
         self.screen.fill(self.bg_color)
         
-        if self.state in ('exploration_state', 'dialogue_state'):
+        if self.state == 'main_menu_state':
+            # Draw sleek main menu
+            self._draw_prototype_grid()
+            
+            # Title
+            self._draw_text("TEMPORAL RESONANCE", self.width // 2, 150, (238, 206, 112), center=True)
+            self._draw_text("Core Engine Prototype", self.width // 2, 180, (150, 150, 155), center=True)
+            
+            pygame.draw.line(self.screen, self.grid_color, (200, 210), (600, 210), 1)
+            
+            # Menu Options
+            start_y = 300
+            spacing = 50
+            
+            for i, option in enumerate(self.main_menu_options):
+                y = start_y + (i * spacing)
+                is_selected = (i == self.main_menu_index)
+                
+                # Check if Continue is disabled
+                is_disabled = (option == "Continue" and not self.save_exists)
+                
+                if is_disabled:
+                    color = (70, 70, 75)
+                    text = option
+                elif is_selected:
+                    color = (30, 144, 255)
+                    text = f"> {option} <"
+                    # Draw highlight box
+                    pygame.draw.rect(self.screen, (40, 40, 50), pygame.Rect(300, y - 15, 200, 30))
+                    pygame.draw.rect(self.screen, (60, 60, 75), pygame.Rect(300, y - 15, 200, 30), 1)
+                else:
+                    color = (200, 200, 210)
+                    text = option
+                    
+                self._draw_text(text, self.width // 2, y, color, center=True)
+                
+            # Version/Info
+            self._draw_text("Use UP/DOWN to navigate | ENTER to select", self.width // 2, 550, (100, 100, 110), center=True)
+            
+        elif self.state in ('exploration_state', 'dialogue_state'):
             # Render solid grey walls from map grid first with frustum culling
             if self.map_grid:
                 tile_size = self.tile_size
@@ -830,6 +1002,105 @@ class Game:
                     else:
                         self._draw_text("Please wait...", 170, 550, (150, 150, 150))
             
+        elif self.state == 'settings_state':
+            # ── LLM Settings Screen ──────────────────────────────────────
+            pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(50, 50, 700, 500))
+            pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(50, 50, 700, 500), 2)
+            
+            # Header
+            self._draw_text("LLM SETTINGS", 400, 90, (238, 206, 112), center=True)
+            pygame.draw.line(self.screen, self.grid_color, (100, 120), (700, 120), 1)
+            
+            # Current config display
+            y_start = 155
+            row_height = 70
+            
+            fields_display = [
+                {
+                    "key": "provider",
+                    "label": "Provider",
+                    "value": "Local (Ollama)" if self.llm_provider == "ollama" else "Cloud API",
+                    "hint": "ENTER to toggle"
+                },
+                {
+                    "key": "model",
+                    "label": "Model",
+                    "value": self.ollama_model if self.llm_provider == "ollama" else self.api_model,
+                    "hint": "ENTER to edit"
+                },
+                {
+                    "key": "api_key",
+                    "label": "API Key",
+                    "value": self.settings_api_key_display,
+                    "hint": "ENTER to set (saved to .env)"
+                },
+                {
+                    "key": "think",
+                    "label": "Thinking",
+                    "value": "ON" if self.llm_think else "OFF",
+                    "hint": "ENTER to toggle"
+                }
+            ]
+            
+            for i, field_info in enumerate(fields_display):
+                y_pos = y_start + i * row_height
+                is_selected = (i == self.settings_field_index)
+                
+                # Selection indicator
+                if is_selected:
+                    # Draw selection highlight bar
+                    pygame.draw.rect(self.screen, (40, 40, 50),
+                                     pygame.Rect(80, y_pos - 5, 640, row_height - 10))
+                    pygame.draw.rect(self.screen, (60, 60, 75),
+                                     pygame.Rect(80, y_pos - 5, 640, row_height - 10), 1)
+                    label_color = (30, 144, 255)
+                    arrow = "> "
+                else:
+                    label_color = (180, 180, 190)
+                    arrow = "  "
+                
+                # Label
+                self._draw_text(f"{arrow}{field_info['label']}:", 100, y_pos, label_color)
+                
+                # Value — show edit buffer if currently editing this field
+                if is_selected and self.settings_editing:
+                    caret = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+                    # Draw edit box
+                    edit_rect = pygame.Rect(300, y_pos - 2, 380, 28)
+                    pygame.draw.rect(self.screen, (16, 16, 20), edit_rect)
+                    pygame.draw.rect(self.screen, (60, 60, 75), edit_rect, 1)
+                    display_text = self.settings_edit_buffer
+                    # Mask API key input as user types
+                    if field_info['key'] == 'api_key' and display_text:
+                        display_text = "*" * max(0, len(display_text) - 4) + display_text[-4:]
+                    self._draw_text(display_text + caret, 308, y_pos, (255, 255, 255))
+                else:
+                    value_color = (245, 245, 245) if is_selected else (150, 150, 155)
+                    self._draw_text(field_info['value'], 300, y_pos, value_color)
+                
+                # Hint text
+                if is_selected and not self.settings_editing:
+                    self._draw_text(field_info['hint'], 300, y_pos + 28, (100, 100, 110))
+            
+            # Divider
+            pygame.draw.line(self.screen, self.grid_color, (100, y_start + 4 * row_height + 10),
+                             (700, y_start + 4 * row_height + 10), 1)
+            
+            # Provider-specific info
+            info_y = y_start + 4 * row_height + 30
+            if self.llm_provider == "ollama":
+                self._draw_text("Ollama URL: " + self.ollama_url, 100, info_y, (100, 100, 110))
+                self._draw_text("Ensure Ollama is running locally.", 100, info_y + 25, (100, 100, 110))
+            else:
+                self._draw_text("API URL: " + self.api_base_url[:55], 100, info_y, (100, 100, 110))
+                self._draw_text("Key is stored in .env (gitignored, never in source).", 100, info_y + 25, (100, 100, 110))
+            
+            # Footer controls
+            if self.settings_editing:
+                self._draw_text("Type value | ENTER: Confirm | ESC: Cancel", 400, 520, (150, 150, 155), center=True)
+            else:
+                self._draw_text("UP/DOWN: Navigate | ENTER: Select | ESC: Back to Game", 400, 520, (150, 150, 155), center=True)
+        
         elif self.state == 'camp_state':
             # Draw a sleek camp screen UI
             # 1. Clean visual border box

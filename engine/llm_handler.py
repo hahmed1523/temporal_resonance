@@ -1,276 +1,467 @@
+"""
+LLM Handler — Dual-Provider Engine for Temporal Resonance
+=========================================================
+Supports two provider modes:
+  - "ollama": Local Ollama instance with native JSON schema enforcement
+  - "api":    Any OpenAI-compatible API (Gemini, OpenAI, Anthropic, Groq, etc.)
+
+API keys are loaded ONLY from environment variables or a project-local .env file.
+They are never stored in game_state.json or source code.
+
+The extraction pipeline guarantees the game loop always receives a valid response
+dict, even if the model produces garbage, thinking blocks, or nothing at all.
+"""
+
 import urllib.request
 import urllib.error
 import json
 import os
 import re
+from typing import Literal
 
-def scrub_json_response(raw_text: str) -> dict:
+from pydantic import BaseModel, Field, ValidationError
+
+
+# ── Pydantic Response Schema ──────────────────────────────────────────────────
+
+class SaifResponse(BaseModel):
+    """Strict contract for LLM output. Used for schema enforcement and validation."""
+    dialogue: str = Field(
+        description="The spoken line of dialogue from Saif, staying in character."
+    )
+    respect_change: Literal[-10, 0, 10] = Field(
+        description="The integer change in respect: must be exactly -10, 0, or 10."
+    )
+
+
+# ── Safe Fallback ─────────────────────────────────────────────────────────────
+
+SAFE_FALLBACK: dict = {
+    "dialogue": "...(Saif stares into the distance, silent)...",
+    "respect_change": 0
+}
+
+
+# ── .env File Loader ──────────────────────────────────────────────────────────
+
+def load_env_file(env_path: str = None) -> None:
     """
-    Sanitizes raw model output to find and extract the valid JSON object segment,
-    removing any conversational padding, introductory text, or <think> tags.
+    Loads KEY=VALUE pairs from a .env file into os.environ.
+    Skips comments (#) and blank lines. Does not override existing env vars.
+    This avoids adding python-dotenv as a dependency.
     """
-    match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-    if match:
+    if env_path is None:
+        # Look for .env in project root (two levels up from engine/)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(project_root, ".env")
+
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # Strip surrounding quotes if present
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                # Do not override existing environment variables
+                if key not in os.environ:
+                    os.environ[key] = value
+    except Exception as e:
+        print(f"[LLM System] Warning: Could not read .env file: {e}")
+
+
+def save_api_key_to_env(api_key: str, env_path: str = None) -> None:
+    """
+    Saves or updates the API_KEY entry in the project .env file.
+    Creates the file if it doesn't exist. Never stores keys in game_state.json.
+    """
+    if env_path is None:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(project_root, ".env")
+
+    lines = []
+    key_found = False
+
+    if os.path.exists(env_path):
         try:
-            return json.loads(match.group())
-        except Exception as e:
-            print(f"[LLM Scrubber] JSON decoding failed on parsed segment: {e}")
-            print(f"Parsed Segment: {match.group()}")
-    else:
-        print("[LLM Scrubber] No JSON block matched in model response.")
-        print(f"Raw response was: {raw_text}")
+            with open(env_path, "r") as f:
+                for line in f:
+                    if line.strip().startswith("API_KEY="):
+                        lines.append(f'API_KEY="{api_key}"\n')
+                        key_found = True
+                    else:
+                        lines.append(line)
+        except Exception:
+            pass
+
+    if not key_found:
+        lines.append(f'API_KEY="{api_key}"\n')
+
+    try:
+        with open(env_path, "w") as f:
+            f.writelines(lines)
+        # Also set it in the current process environment
+        os.environ["API_KEY"] = api_key
+        print("[LLM System] API key saved to .env file (gitignored).")
+    except Exception as e:
+        print(f"[LLM System] Warning: Could not save .env file: {e}")
+
+
+# Load .env on module import
+load_env_file()
+
+
+# ── JSON Extraction Pipeline ─────────────────────────────────────────────────
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks that thinking models emit."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """
+    Strip markdown code fences (```json ... ``` or ``` ... ```).
+    Extracts only the content inside the fences.
+    """
+    # Try to find fenced code block content
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
+
+
+def _find_json_by_brace_depth(text: str) -> str | None:
+    """
+    Locate the outermost complete JSON object using brace-depth counting.
+    Correctly handles braces inside string literals.
+
+    Returns the JSON substring or None if no complete object found.
+    """
+    start = None
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, ch in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if ch == "\\":
+            if in_string:
+                escape_next = True
+            continue
+
+        if ch == '"':
+            if not in_string and depth > 0:
+                in_string = True
+            elif in_string:
+                in_string = False
+            elif not in_string and depth == 0 and start is not None:
+                # Quote outside of any object — skip
+                pass
+            continue
+
+        if in_string:
+            continue
+
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                return text[start : i + 1]
+
     return None
 
-def generate_llm_response(player_text: str, game_state: dict) -> dict:
+
+def _clamp_respect(value) -> int:
+    """Clamp respect_change to nearest valid value (-10, 0, or 10)."""
+    try:
+        val = int(value)
+    except (TypeError, ValueError):
+        return 0
+
+    if val > 0:
+        return 10
+    elif val < 0:
+        return -10
+    return 0
+
+
+def extract_json_payload(raw_text: str) -> dict:
     """
-    Queries selected LLM provider (standard Gemini API or model-agnostic local Ollama),
-    with a robust rule-based mock fallback.
-    Injects dynamic game state variables (HP, Respect) and rolling chat history context.
-    Returns: dict {"dialogue": str, "respect_change": int}
+    Bulletproof JSON extraction pipeline:
+    1. Strip <think>...</think> blocks
+    2. Strip markdown code fences
+    3. Find outermost JSON object via brace-depth counting
+    4. Parse via json.loads()
+    5. Validate against SaifResponse Pydantic schema
+    6. Return clean dict or SAFE_FALLBACK — NEVER returns None
+
+    This handles frontier models that emit thousands of words of reasoning,
+    thinking blocks with JSON fragments, markdown formatting, and conversational
+    padding around the actual JSON response.
     """
-    # Extract stats from game_state
-    saif_respect = game_state.get("saif_respect", 50)
-    player_hp = game_state.get("player_hp", 100)
-    enemy_hp = game_state.get("enemy_hp", 100)
-    chat_history = game_state.get("chat_history", [])
-    
-    # Resolve LLM configuration options (prioritizing environment variables)
-    llm_provider = os.environ.get("LLM_PROVIDER") or game_state.get("llm_provider", "gemini")
-    ollama_model = os.environ.get("OLLAMA_MODEL") or game_state.get("ollama_model", "gemma4:e4b")
-    ollama_url = os.environ.get("OLLAMA_URL") or game_state.get("ollama_url", "http://localhost:11434")
-    
-    # Format rolling chat history
+    if not raw_text or not raw_text.strip():
+        print("[LLM Extractor] Empty response received.")
+        return SAFE_FALLBACK.copy()
+
+    # Step 1: Strip thinking blocks
+    cleaned = _strip_think_blocks(raw_text)
+
+    # Step 2: Strip markdown fences
+    cleaned = _strip_markdown_fences(cleaned)
+
+    # Step 3: Find JSON via brace-depth matching
+    json_str = _find_json_by_brace_depth(cleaned)
+    if not json_str:
+        print("[LLM Extractor] No JSON object found in response.")
+        print(f"  Cleaned text was: {cleaned[:200]}...")
+        return SAFE_FALLBACK.copy()
+
+    # Step 4: Parse JSON
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        print(f"[LLM Extractor] JSON decode failed: {e}")
+        print(f"  Attempted to parse: {json_str[:200]}...")
+        return SAFE_FALLBACK.copy()
+
+    # Step 5: Validate against Pydantic schema
+    try:
+        validated = SaifResponse(**parsed)
+        return validated.model_dump()
+    except ValidationError:
+        # Try to salvage — extract what we can and clamp values
+        dialogue = parsed.get("dialogue")
+        respect = parsed.get("respect_change")
+
+        if isinstance(dialogue, str) and dialogue.strip():
+            return {
+                "dialogue": dialogue.strip(),
+                "respect_change": _clamp_respect(respect)
+            }
+
+        print(f"[LLM Extractor] Pydantic validation failed. Parsed: {parsed}")
+        return SAFE_FALLBACK.copy()
+
+
+# ── Prompt Construction ───────────────────────────────────────────────────────
+
+def _build_system_prompt(saif_respect: int, player_hp: int, enemy_hp: int,
+                         in_combat: bool) -> str:
+    """Build the character system prompt with dynamic game state injection."""
+    if in_combat:
+        context = (
+            f"You are Saif, an Arabian Desert Guardian. You are currently in battle. "
+            f"Your Respect for the player is {saif_respect}/100. "
+            f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
+            f"Factor these stats into your response. "
+        )
+    else:
+        context = (
+            f"You are Saif, an Arabian Desert Guardian. A stranger has approached you on the map. "
+            f"You are cautious but can be convinced to join them. "
+            f"Your Respect for them is {saif_respect}/100. "
+            f"Factor this stat into your response. "
+        )
+
+    rules = (
+        "Respond in 1 or 2 short sentences, staying in character.\n\n"
+        "RESPECT RULES (you MUST follow these exactly):\n"
+        "- If the player speaks bravely, respectfully, appeals to honor/duty, "
+        "or offers genuine help → respect_change: 10\n"
+        "- If the player insults you, acts cowardly, complains, shows weakness, "
+        "or disrespects you → respect_change: -10\n"
+        "- If the player's message is neutral, a simple question, or small talk "
+        "→ respect_change: 0\n\n"
+        "You MUST pick exactly one of: -10, 0, or 10. No other values.\n\n"
+        "You MUST respond with ONLY a JSON object matching this exact schema:\n"
+        '{"dialogue": "Your reply as Saif", "respect_change": <-10 or 0 or 10>}\n'
+        "Do NOT include any other text, explanation, or markdown. ONLY the JSON object."
+    )
+
+    return context + rules
+
+
+def _build_user_prompt(player_text: str, chat_history: list) -> str:
+    """Build the user message with rolling chat history context."""
     history_str = ""
     if chat_history:
         history_str = "Recent Chat History:\n"
         for exchange in chat_history:
             if len(exchange) == 2:
-                history_str += f"Player: \"{exchange[0]}\"\nSaif: \"{exchange[1]}\"\n"
+                history_str += f'Player: "{exchange[0]}"\nSaif: "{exchange[1]}"\n'
         history_str += "\n"
-        
-    # 1. Check for standard Gemini API Key
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if llm_provider == "gemini" and api_key:
-        model_name = "gemini-2.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        
-        in_combat = game_state.get("in_combat", True)
-        if in_combat:
-            system_instruction = (
-                f"You are Saif, an Arabian Desert Guardian. You are currently in battle. "
-                f"Your Respect for the player is {saif_respect}/100. "
-                f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
-                f"Factor these stats into your response. "
-                f"Respond in 1 or 2 short sentences. Based on what they say, decide if "
-                f"your respect for them goes up (+10), down (-10), or stays the same (0)."
-            )
-        else:
-            system_instruction = (
-                f"You are Saif, an Arabian Desert Guardian. A stranger has approached you on the map. "
-                f"You are cautious but can be convinced to join them. "
-                f"Your Respect for them is {saif_respect}/100. "
-                f"Factor this stat into your response. "
-                f"Respond in 1 or 2 short sentences. Based on what they say, decide if "
-                f"your respect for them goes up (+10), down (-10), or stays the same (0)."
-            )
-        
-        prompt = (
-            f"{history_str}"
-            f"Player says: \"{player_text}\"\n\n"
-            "Return a JSON object matching this schema: {\"dialogue\": \"Saif's reply\", \"respect_change\": integer (-10, 0, or 10)}"
-        )
-        
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }],
-            "systemInstruction": {
-                "parts": [{"text": system_instruction}]
-            },
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "dialogue": {"type": "STRING"},
-                        "respect_change": {"type": "INTEGER"}
-                    },
-                    "required": ["dialogue", "respect_change"]
-                }
-            }
-        }
-        
-        print("\n=== [LLM API Request] ===")
-        print(f"Target URL: https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent")
-        print(f"Payload Sent:\n{json.dumps(payload, indent=2)}")
-        print("=========================\n")
-        
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            with urllib.request.urlopen(req, timeout=8) as response:
-                res_body = response.read().decode('utf-8')
-                res_json = json.loads(res_body)
-                
-                print("=== [LLM API Response] ===")
-                print(f"Raw Response:\n{json.dumps(res_json, indent=2)}")
-                print("==========================\n")
-                
-                text_out = res_json['candidates'][0]['content']['parts'][0]['text']
-                scrubbed = scrub_json_response(text_out)
-                if scrubbed:
-                    return scrubbed
-        except urllib.error.HTTPError as he:
-            err_body = he.read().decode('utf-8') if he else "No error body"
-            print(f"[LLM System] Gemini API failed with HTTP {he.code}: {he.reason}")
-            print(f"Error Response Body:\n{err_body}")
-        except Exception as e:
-            print(f"[LLM System] Gemini API failed: {e}. Falling back...")
-            
-    # 2. Model-Agnostic Native Ollama Chat Endpoint
-    if llm_provider == "ollama" or (llm_provider == "gemini" and not api_key):
-        url = f"{ollama_url.rstrip('/')}/api/chat"
-        in_combat = game_state.get("in_combat", True)
-        
-        if in_combat:
-            system_prompt = (
-                f"You are Saif, an Arabian Desert Guardian in battle. "
-                f"Your Respect for the player is {saif_respect}/100. "
-                f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
-                f"Factor these stats into your response. "
-                f"Respond in 1 or 2 short sentences. "
-                f"Based on what they say, you MUST adjust your respect level: "
-                f"increase by +10 if they speak bravely, respectfully, or offer genuine help; "
-                f"decrease by -10 if they act weak, complain, insult you, or act cowardly; "
-                f"otherwise return 0."
-            )
-        else:
-            system_prompt = (
-                f"You are Saif, an Arabian Desert Guardian cautious about a stranger who approached you on the map. "
-                f"Your Respect for them is {saif_respect}/100. "
-                f"Factor this stat into your response. "
-                f"Respond in 1 or 2 short sentences. "
-                f"Based on what they say, you MUST adjust your respect level: "
-                f"increase by +10 if they speak respectfully, bravely, or appeal to your honor/duty; "
-                f"decrease by -10 if they act weak, complain, insult you, or act cowardly; "
-                f"otherwise return 0."
-            )
-            
-        user_prompt = (
-            f"{history_str}"
-            f"Player says: \"{player_text}\"\n\n"
-            f"Return a JSON object matching this schema: "
-            f"{{\"dialogue\": \"Saif's reply\", \"respect_change\": integer (-10, 0, or 10)}}. "
-            f"IMPORTANT: If your internal thinking process decides to change respect (e.g. +10 or -10), "
-            f"you MUST reflect this identical integer value (+10, -10, or 0) in the 'respect_change' "
-            f"field of your final JSON response block. Do not output 0 if you reasoned it should change!"
-        )
-        
-        payload = {
-            "model": ollama_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "format": "json",
-            "think": False,
-            "stream": False,
-            "options": {
-                "temperature": 0.5
-            }
-        }
-        
-        print("\n=== [Ollama API Request] ===")
-        print(f"Target URL: {url}")
-        print(f"Model: {ollama_model}")
-        print(f"Payload Sent:\n{json.dumps(payload, indent=2)}")
-        print("============================\n")
-        
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            with urllib.request.urlopen(req, timeout=60) as response:
-                res_body = response.read().decode('utf-8')
-                res_json = json.loads(res_body)
-                
-                print("=== [Ollama API Response] ===")
-                print(f"Raw Response:\n{json.dumps(res_json, indent=2)}")
-                print("=============================\n")
-                
-                text_out = res_json['message']['content']
-                scrubbed = scrub_json_response(text_out)
-                if scrubbed:
-                    return scrubbed
-        except Exception as e:
-            print(f"[LLM System] Ollama native API query failed: {e}. Trying legacy local compatibility...")
 
-    # 3. Legacy Local LLM compatible fallback
-    local_url = os.environ.get("LOCAL_LLM_URL")
-    if local_url or os.environ.get("USE_LOCAL_LLM"):
-        url = local_url or "http://localhost:11434/v1/chat/completions"
-        in_combat = game_state.get("in_combat", True)
-        if in_combat:
-            system_prompt = (
-                f"You are Saif, an Arabian Desert Guardian. You are currently in battle. "
-                f"Your Respect for the player is {saif_respect}/100. "
-                f"The Player has {player_hp} HP. The Enemy has {enemy_hp} HP. "
-                f"Factor these stats into your response. "
-                f"Respond in 1-2 short sentences. Decide if respect changes: +10, -10, or 0. "
-                f"You must output ONLY a JSON object matching: {{\"dialogue\": \"reply\", \"respect_change\": integer}}"
-            )
-        else:
-            system_prompt = (
-                f"You are Saif, an Arabian Desert Guardian. A stranger has approached you on the map. "
-                f"You are cautious but can be convinced to join them. "
-                f"Your Respect for them is {saif_respect}/100. "
-                f"Factor this stat into your response. "
-                f"Respond in 1-2 short sentences. Decide if respect changes: +10, -10, or 0. "
-                f"You must output ONLY a JSON object matching: {{\"dialogue\": \"reply\", \"respect_change\": integer}}"
-            )
-        user_content = f"{history_str}Player: '{player_text}'"
-        payload = {
-            "model": ollama_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            "response_format": {"type": "json_object"}
-        }
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            with urllib.request.urlopen(req, timeout=60) as response:
-                res_body = response.read().decode('utf-8')
-                res_json = json.loads(res_body)
-                text_out = res_json['choices'][0]['message']['content']
-                scrubbed = scrub_json_response(text_out)
-                if scrubbed:
-                    return scrubbed
-        except Exception as e:
-            print(f"[LLM System] Legacy Local LLM failed: {e}. Falling back...")
+    return (
+        f"{history_str}"
+        f'Player says: "{player_text}"\n\n'
+        'Respond with ONLY the JSON object. No other text.'
+    )
 
-    # 4. Premium Rule-Based Mock Fallback (Offline / Sandbox)
+
+# ── Provider Implementations ─────────────────────────────────────────────────
+
+def _call_ollama(system_prompt: str, user_prompt: str,
+                 model: str, base_url: str, think: bool) -> str | None:
+    """
+    Call local Ollama using the native /api/chat endpoint.
+    Uses structured JSON schema enforcement via the 'format' parameter.
+    """
+    url = f"{base_url.rstrip('/')}/api/chat"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "format": SaifResponse.model_json_schema(),
+        "think": think,
+        "stream": False,
+        "options": {
+            "temperature": 0.5
+        }
+    }
+
+    print(f"\n=== [Ollama Request] ===")
+    print(f"  Model: {model} | Think: {think}")
+    print(f"  URL: {url}")
+    print(f"========================\n")
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        # Thinking models + cold model loads can take 2-3+ minutes
+        print("[LLM System] Waiting for Ollama response (game will resume when ready)...")
+        with urllib.request.urlopen(req, timeout=300) as response:
+            res_body = response.read().decode("utf-8")
+            res_json = json.loads(res_body)
+
+            print(f"=== [Ollama Response] ===")
+            # Print thinking content if present
+            thinking = res_json.get("message", {}).get("thinking")
+            if thinking:
+                print(f"  Thinking: {thinking[:200]}...")
+            content = res_json.get("message", {}).get("content", "")
+            print(f"  Content: {content[:300]}")
+            print(f"=========================\n")
+
+            return content
+
+    except urllib.error.URLError as e:
+        print(f"[LLM System] Ollama connection failed: {e}")
+        print(f"  Is Ollama running at {base_url}?")
+    except Exception as e:
+        print(f"[LLM System] Ollama request failed: {e}")
+
+    return None
+
+
+def _call_api(system_prompt: str, user_prompt: str,
+              model: str, base_url: str, api_key: str) -> str | None:
+    """
+    Call any OpenAI-compatible API endpoint.
+    Works with Gemini, OpenAI, Anthropic (via compatible endpoint), Groq, etc.
+    """
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.5,
+        "response_format": {"type": "json_object"}
+    }
+
+    print(f"\n=== [API Request] ===")
+    print(f"  Model: {model}")
+    print(f"  URL: {url}")
+    # TODO(security): Never log the API key
+    print(f"  Key: {'*' * 8}...{api_key[-4:] if len(api_key) > 4 else '****'}")
+    print(f"=====================\n")
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            res_body = response.read().decode("utf-8")
+            res_json = json.loads(res_body)
+
+            print(f"=== [API Response] ===")
+            print(f"  Raw: {json.dumps(res_json, indent=2)[:500]}")
+            print(f"======================\n")
+
+            # OpenAI-compatible format
+            content = res_json["choices"][0]["message"]["content"]
+            return content
+
+    except urllib.error.HTTPError as he:
+        err_body = ""
+        try:
+            err_body = he.read().decode("utf-8")
+        except Exception:
+            pass
+        print(f"[LLM System] API failed with HTTP {he.code}: {he.reason}")
+        if err_body:
+            print(f"  Error body: {err_body[:300]}")
+    except Exception as e:
+        print(f"[LLM System] API request failed: {e}")
+
+    return None
+
+
+# ── Heuristic Mock Fallback ───────────────────────────────────────────────────
+
+def _heuristic_response(player_text: str) -> dict:
+    """
+    Premium rule-based mock fallback for offline / sandbox mode.
+    Provides reasonable responses when no LLM is available.
+    """
     text_lower = player_text.lower()
-    
-    # Keyword analysis
-    positive_words = ["leader", "trust", "stay", "protect", "help", "friend", "believe", "save", "together"]
-    negative_words = ["coward", "weak", "blame", "run", "fail", "bad", "useless", "scared"]
-    
+
+    positive_words = [
+        "leader", "trust", "stay", "protect", "help", "friend",
+        "believe", "save", "together", "honor", "brave", "fight",
+        "strong", "respect", "ally", "defend", "courage"
+    ]
+    negative_words = [
+        "coward", "weak", "blame", "run", "fail", "bad",
+        "useless", "scared", "pathetic", "fool", "stupid",
+        "worthless", "quit", "give up", "abandon"
+    ]
+
     pos_score = sum(1 for w in positive_words if w in text_lower)
     neg_score = sum(1 for w in negative_words if w in text_lower)
-    
+
     if pos_score > neg_score:
         dialogue = "I... I want to protect you, but the desert has taken so much. Perhaps your words have truth."
         respect_change = 10
@@ -280,8 +471,102 @@ def generate_llm_response(player_text: str, game_state: dict) -> dict:
     else:
         dialogue = "The sands of time offer no easy answers. We must watch our step."
         respect_change = 0
-        
+
     return {
-        "dialogue": f"[Heuristic Saif] {dialogue}",
+        "dialogue": f"[Offline] {dialogue}",
         "respect_change": respect_change
     }
+
+
+# ── Main Entry Point ─────────────────────────────────────────────────────────
+
+def generate_llm_response(player_text: str, game_state: dict) -> dict:
+    """
+    Unified LLM query function. Routes to the configured provider, extracts
+    and validates the response, and guarantees a clean dict is returned.
+
+    The game loop NEVER receives None or malformed data from this function.
+
+    Args:
+        player_text: The player's typed input.
+        game_state: Dict containing game stats and LLM configuration.
+
+    Returns:
+        dict with exactly {"dialogue": str, "respect_change": int}
+    """
+    # ── Resolve configuration (env var → game_state → default) ────────────
+    provider = (
+        os.environ.get("LLM_PROVIDER")
+        or game_state.get("llm_provider", "ollama")
+    )
+    ollama_model = (
+        os.environ.get("OLLAMA_MODEL")
+        or game_state.get("ollama_model", "gemma4:e4b")
+    )
+    ollama_url = (
+        os.environ.get("OLLAMA_URL")
+        or game_state.get("ollama_url", "http://localhost:11434")
+    )
+    api_base_url = (
+        os.environ.get("API_BASE_URL")
+        or game_state.get("api_base_url",
+                          "https://generativelanguage.googleapis.com/v1beta/openai")
+    )
+    api_model = (
+        os.environ.get("API_MODEL")
+        or game_state.get("api_model", "gemini-2.5-flash")
+    )
+    api_key = os.environ.get("API_KEY", "")
+
+    # Think toggle: env var → game_state → default True
+    think_env = os.environ.get("LLM_THINK")
+    if think_env is not None:
+        think = think_env.lower() in ("true", "1", "yes")
+    else:
+        think = game_state.get("llm_think", True)
+
+    # ── Extract game stats ────────────────────────────────────────────────
+    saif_respect = game_state.get("saif_respect", 50)
+    player_hp = game_state.get("player_hp", 100)
+    enemy_hp = game_state.get("enemy_hp", 100)
+    chat_history = game_state.get("chat_history", [])
+    in_combat = game_state.get("in_combat", True)
+
+    # ── Build prompts ─────────────────────────────────────────────────────
+    system_prompt = _build_system_prompt(saif_respect, player_hp, enemy_hp, in_combat)
+    user_prompt = _build_user_prompt(player_text, chat_history)
+
+    # ── Provider dispatch ─────────────────────────────────────────────────
+    raw_text = None
+
+    if provider == "ollama":
+        raw_text = _call_ollama(
+            system_prompt, user_prompt,
+            model=ollama_model,
+            base_url=ollama_url,
+            think=think
+        )
+    elif provider == "api":
+        if not api_key:
+            print("[LLM System] No API key found. Set API_KEY env var or configure in Settings.")
+            print("  Falling back to heuristic response.")
+        else:
+            raw_text = _call_api(
+                system_prompt, user_prompt,
+                model=api_model,
+                base_url=api_base_url,
+                api_key=api_key
+            )
+    else:
+        print(f"[LLM System] Unknown provider '{provider}'. Falling back to heuristic.")
+
+    # ── Extract and validate ──────────────────────────────────────────────
+    if raw_text:
+        result = extract_json_payload(raw_text)
+        print(f"[LLM Result] dialogue='{result['dialogue'][:60]}...' "
+              f"respect_change={result['respect_change']}")
+        return result
+
+    # ── Fallback: heuristic mock ──────────────────────────────────────────
+    print("[LLM System] All providers failed. Using heuristic fallback.")
+    return _heuristic_response(player_text)
