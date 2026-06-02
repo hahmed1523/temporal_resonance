@@ -1291,7 +1291,7 @@ class Game:
                         self._draw_text(line, 170, 495 + idx * 25, (245, 245, 245))
                     
                     # Helper text (if recruited, show join notice, else show wait)
-                    if self.saif_respect >= 70:
+                    if not self.saif_recruited and self.saif_respect >= 70:
                         self._draw_text("Saif is joining the party...", 170, 550, (46, 139, 87))
                     else:
                         self._draw_text("Please wait...", 170, 550, (150, 150, 150))
