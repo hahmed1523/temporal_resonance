@@ -229,9 +229,9 @@ class Game:
         Resets combat-specific variables only, preserving long-term relationship
         metrics like respect and recruitment status.
         """
-        self.player_hp = 100
+        self.player_hp = self.player_max_hp
         self.enemy_hp = 100
-        self.saif_hp = 100
+        self.saif_hp = self.saif_max_hp
         self.combat_turn = 'player'
         self.combat_mode = 'menu'
         self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
@@ -356,6 +356,86 @@ class Game:
         self.state = 'exploration_state'
         self._knockback_player()
 
+    def _trigger_victory(self):
+        """
+        Awards EXP, processes level up, sets up victory screen state, and triggers feedback.
+        """
+        self.combat_mode = 'victory'
+        self.victory_start_time = pygame.time.get_ticks()
+        
+        # Award 50 EXP to player
+        self.player_exp += 50
+        print(f"[Combat] Enemy defeated! Gained 50 EXP. Total EXP: {self.player_exp}")
+        
+        # Spawn floating +50 EXP text at the player position
+        self.floating_texts.append({
+            "text": "+50 EXP",
+            "x": self.player_combat_pos[0] + self.player.size // 2,
+            "y": self.player_combat_pos[1],
+            "timer": 90
+        })
+        
+        # Check player level up
+        self.levelled_up = False
+        while self.player_exp >= self.exp_to_next_level:
+            self.player_exp -= self.exp_to_next_level
+            self.player_level += 1
+            self.exp_to_next_level = int(self.exp_to_next_level * 1.5)
+            self.player_max_hp += 10
+            self.player_base_damage += 10
+            self.player_hp = self.player_max_hp
+            self.levelled_up = True
+            
+        if self.levelled_up:
+            print(f"[Combat] LEVEL UP! Player is now Level {self.player_level}!")
+            self.screen_shake_frames = 30
+            self.floating_texts.append({
+                "text": "LEVEL UP!",
+                "x": self.player_combat_pos[0] + self.player.size // 2,
+                "y": self.player_combat_pos[1] - 20,
+                "timer": 90
+            })
+            self.sound_manager.play_sfx("parry")
+            
+        # Award 50 EXP to Saif (if recruited)
+        self.saif_levelled_up = False
+        if self.saif_recruited:
+            self.saif_exp += 50
+            print(f"[Combat] Saif Gained 50 EXP. Total EXP: {self.saif_exp}")
+            
+            # Spawn floating +50 EXP text at Saif's position
+            self.floating_texts.append({
+                "text": "+50 EXP",
+                "x": self.saif_combat_pos[0] + self.player.size // 2,
+                "y": self.saif_combat_pos[1],
+                "timer": 90
+            })
+            
+            # Check Saif level up
+            while self.saif_exp >= self.saif_exp_to_next_level:
+                self.saif_exp -= self.saif_exp_to_next_level
+                self.saif_level += 1
+                self.saif_exp_to_next_level = int(self.saif_exp_to_next_level * 1.5)
+                self.saif_max_hp += 10
+                self.saif_base_damage += 10
+                self.saif_hp = self.saif_max_hp
+                self.saif_levelled_up = True
+                
+            if self.saif_levelled_up:
+                print(f"[Combat] LEVEL UP! Saif is now Level {self.saif_level}!")
+                self.screen_shake_frames = 30
+                self.floating_texts.append({
+                    "text": "LEVEL UP!",
+                    "x": self.saif_combat_pos[0] + self.player.size // 2,
+                    "y": self.saif_combat_pos[1] - 20,
+                    "timer": 90
+                })
+                # Play sound placeholder if not already played for player
+                if not self.levelled_up:
+                    self.sound_manager.play_sfx("parry")
+            
+        self._save_game_state()
+
     def _process_chat_input(self, in_combat: bool):
         """
         Handles the shared chat submission logic for both overworld dialogue
@@ -418,12 +498,33 @@ class Game:
         self.llm_think = True
         self.inventory = {"health_potion": 0}
         self.current_location = "overworld"
+        self.player_max_hp = 100
+        self.player_level = 1
+        self.player_exp = 0
+        self.exp_to_next_level = 100
+        self.player_base_damage = 20
+        self.saif_max_hp = 100
+        self.saif_level = 1
+        self.saif_exp = 0
+        self.saif_exp_to_next_level = 100
+        self.saif_base_damage = 15
         
         if os.path.exists(self.state_file_path):
             try:
                 with open(self.state_file_path, 'r') as f:
                     data = json.load(f)
-                    self.player_hp = data.get("player_hp", 100)
+                    self.player_max_hp = data.get("player_max_hp", 100)
+                    self.player_base_damage = data.get("player_base_damage", 20)
+                    self.player_level = data.get("player_level", 1)
+                    self.player_exp = data.get("player_exp", 0)
+                    self.exp_to_next_level = data.get("exp_to_next_level", 100)
+                    self.player_hp = data.get("player_hp", self.player_max_hp)
+                    self.saif_max_hp = data.get("saif_max_hp", 100)
+                    self.saif_base_damage = data.get("saif_base_damage", 15)
+                    self.saif_level = data.get("saif_level", 1)
+                    self.saif_exp = data.get("saif_exp", 0)
+                    self.saif_exp_to_next_level = data.get("saif_exp_to_next_level", 100)
+                    self.saif_hp = data.get("saif_hp", self.saif_max_hp)
                     self.enemy_hp = data.get("enemy_hp", 100)
                     self.saif_respect = data.get("saif_respect", 50)
                     self.saif_hp = data.get("saif_hp", 100)
@@ -449,10 +550,20 @@ class Game:
         Resets active game variables in memory while preserving custom LLM and inventory configurations,
         and commits them back to JSON.
         """
+        self.player_max_hp = 100
+        self.player_base_damage = 20
+        self.player_level = 1
+        self.player_exp = 0
+        self.exp_to_next_level = 100
         self.player_hp = 100
         self.enemy_hp = 100
         self.saif_respect = 50
         self.saif_hp = 100
+        self.saif_max_hp = 100
+        self.saif_level = 1
+        self.saif_exp = 0
+        self.saif_exp_to_next_level = 100
+        self.saif_base_damage = 15
         self.chest_opened = False
         self.saif_recruited = False
         self.chat_history = []
@@ -482,9 +593,19 @@ class Game:
         """
         data = {
             "player_hp": self.player_hp,
+            "player_max_hp": self.player_max_hp,
+            "player_base_damage": self.player_base_damage,
+            "player_level": self.player_level,
+            "player_exp": self.player_exp,
+            "exp_to_next_level": self.exp_to_next_level,
+            "saif_hp": self.saif_hp,
+            "saif_max_hp": self.saif_max_hp,
+            "saif_base_damage": self.saif_base_damage,
+            "saif_level": self.saif_level,
+            "saif_exp": self.saif_exp,
+            "saif_exp_to_next_level": self.saif_exp_to_next_level,
             "enemy_hp": self.enemy_hp,
             "saif_respect": self.saif_respect,
-            "saif_hp": self.saif_hp,
             "chest_opened": self.chest_opened,
             "saif_recruited": self.saif_recruited,
             "chat_history": self.chat_history,
@@ -510,9 +631,19 @@ class Game:
         """
         save_data = {
             "player_hp": self.player_hp,
+            "player_max_hp": self.player_max_hp,
+            "player_base_damage": self.player_base_damage,
+            "player_level": self.player_level,
+            "player_exp": self.player_exp,
+            "exp_to_next_level": self.exp_to_next_level,
+            "saif_hp": self.saif_hp,
+            "saif_max_hp": self.saif_max_hp,
+            "saif_base_damage": self.saif_base_damage,
+            "saif_level": self.saif_level,
+            "saif_exp": self.saif_exp,
+            "saif_exp_to_next_level": self.saif_exp_to_next_level,
             "enemy_hp": self.enemy_hp,
             "saif_respect": self.saif_respect,
-            "saif_hp": self.saif_hp,
             "chest_opened": self.chest_opened,
             "saif_recruited": self.saif_recruited,
             "chat_history": self.chat_history,
@@ -544,7 +675,18 @@ class Game:
             try:
                 with open(self.save_slot_file, 'r') as f:
                     data = json.load(f)
-                    self.player_hp = data.get("player_hp", 100)
+                    self.player_max_hp = data.get("player_max_hp", 100)
+                    self.player_base_damage = data.get("player_base_damage", 20)
+                    self.player_level = data.get("player_level", 1)
+                    self.player_exp = data.get("player_exp", 0)
+                    self.exp_to_next_level = data.get("exp_to_next_level", 100)
+                    self.player_hp = data.get("player_hp", self.player_max_hp)
+                    self.saif_max_hp = data.get("saif_max_hp", 100)
+                    self.saif_base_damage = data.get("saif_base_damage", 15)
+                    self.saif_level = data.get("saif_level", 1)
+                    self.saif_exp = data.get("saif_exp", 0)
+                    self.saif_exp_to_next_level = data.get("saif_exp_to_next_level", 100)
+                    self.saif_hp = data.get("saif_hp", self.saif_max_hp)
                     self.enemy_hp = data.get("enemy_hp", 100)
                     self.saif_respect = data.get("saif_respect", 50)
                     self.saif_hp = data.get("saif_hp", 100)
@@ -742,8 +884,8 @@ class Game:
             dist_x = abs(self.player.x - self.campfire_pos[0])
             dist_y = abs(self.player.y - self.campfire_pos[1])
             if dist_x <= 45 and dist_y <= 45:
-                self.player_hp = 100
-                self.saif_hp = 100
+                self.player_hp = self.player_max_hp
+                self.saif_hp = self.saif_max_hp
                 self.rest_notification_active = True
                 self._save_game_state()
                 print("The party rested at the fire. HP fully restored!")
@@ -858,8 +1000,8 @@ class Game:
                     self.current_location = "overworld"
                     self.player.x, self.player.y = 960, 1040 # Reset starting position
                     self.enemy_hp = 100
-                    self.player_hp = 100
-                    self.saif_hp = 100
+                    self.player_hp = self.player_max_hp
+                    self.saif_hp = self.saif_max_hp
                     self._update_camera()
                     self.state = 'exploration_state'
                     print("[System] Started New Game.")
@@ -966,6 +1108,11 @@ class Game:
 
     def _handle_combat_events(self, event):
         """Handles KEYDOWN events during the combat state."""
+        if self.combat_mode == 'victory':
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_ESCAPE):
+                self._end_battle_victory()
+                return
+
         if event.key == pygame.K_ESCAPE and self.combat_mode == 'menu':
             self.is_running = False
 
@@ -1090,7 +1237,7 @@ class Game:
                     print("[Combat] Item selected. Select target: 1 for Player, 2 for Saif.")
                 else:
                     self.inventory["health_potion"] = potions - 1
-                    self.player_hp = min(100, self.player_hp + 50)
+                    self.player_hp = min(self.player_max_hp, self.player_hp + 50)
                     self._save_game_state()
                     print(f"Used a Health Potion! Restored 50 HP. Player HP: {self.player_hp}")
                     
@@ -1123,7 +1270,7 @@ class Game:
             potions = self.inventory.get("health_potion", 0)
             if potions > 0:
                 self.inventory["health_potion"] = potions - 1
-                self.player_hp = min(100, self.player_hp + 50)
+                self.player_hp = min(self.player_max_hp, self.player_hp + 50)
                 self._save_game_state()
                 print(f"Used a Health Potion! Restored 50 HP to Player. Player HP: {self.player_hp}")
                 self.combat_mode = 'menu'
@@ -1132,7 +1279,7 @@ class Game:
             potions = self.inventory.get("health_potion", 0)
             if potions > 0:
                 self.inventory["health_potion"] = potions - 1
-                self.saif_hp = min(100, self.saif_hp + 50)
+                self.saif_hp = min(self.saif_max_hp, self.saif_hp + 50)
                 self._save_game_state()
                 print(f"Used a Health Potion! Restored 50 HP to Saif. Saif HP: {self.saif_hp}")
                 self.combat_mode = 'menu'
@@ -1226,6 +1373,7 @@ class Game:
                     if self.saif_respect >= 70:
                         print("Saif joined the party!")
                         self.saif_recruited = True
+                        self.saif_hp = self.saif_max_hp
                         self._save_game_state()
                         if self.active_camp_npc == 'saif':
                             self.state = 'camp_state'
@@ -1239,8 +1387,12 @@ class Game:
                 
         # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
+            if self.combat_mode == 'victory':
+                now = pygame.time.get_ticks()
+                if now - self.victory_start_time >= 4000:
+                    self._end_battle_victory()
             # Handle response delay timer (4 seconds)
-            if self.combat_turn == 'player' and self.combat_mode == 'talk_response':
+            elif self.combat_turn == 'player' and self.combat_mode == 'talk_response':
                 now = pygame.time.get_ticks()
                 if now - self.talk_response_start_time >= 4000:
                     self.combat_mode = 'menu'
@@ -1370,14 +1522,14 @@ class Game:
                     
                     if not self.is_combo_attack:
                         if self.enemy_hp <= 0:
-                            self._end_battle_victory()
+                            self._trigger_victory()
                         else:
                             self._end_current_turn()
                     else:
                         # Joint attack check
                         if not self.saif_attack_active:
                             if self.enemy_hp <= 0:
-                                self._end_battle_victory()
+                                self._trigger_victory()
                             else:
                                 self.is_combo_attack = False
                                 self._start_enemy_turn()
@@ -1386,8 +1538,8 @@ class Game:
                 if elapsed >= half_duration and not self.player_damage_dealt:
                     self.player_damage_dealt = True
                     if not self.is_combo_attack:
-                        # Player solo attack deals 20
-                        self._apply_damage_to_enemy(20, is_combo=False)
+                        # Player solo attack deals player_base_damage
+                        self._apply_damage_to_enemy(self.player_base_damage, is_combo=False)
                     else:
                         if not self.combo_damage_applied:
                             self.combo_damage_applied = True
@@ -1418,14 +1570,14 @@ class Game:
                     
                     if not self.is_combo_attack:
                         if self.enemy_hp <= 0:
-                            self._end_battle_victory()
+                            self._trigger_victory()
                         else:
                             self._end_current_turn()
                     else:
                         # Joint attack check
                         if not self.player_attack_active:
                             if self.enemy_hp <= 0:
-                                self._end_battle_victory()
+                                self._trigger_victory()
                             else:
                                 self.is_combo_attack = False
                                 self._start_enemy_turn()
@@ -1434,8 +1586,8 @@ class Game:
                 if elapsed >= half_duration and not self.saif_damage_dealt:
                     self.saif_damage_dealt = True
                     if not self.is_combo_attack:
-                        # Saif solo attack deals 15
-                        self._apply_damage_to_enemy(15, is_combo=False)
+                        # Saif solo attack deals saif_base_damage
+                        self._apply_damage_to_enemy(self.saif_base_damage, is_combo=False)
                     else:
                         if not self.combo_damage_applied:
                             self.combo_damage_applied = True
@@ -1604,9 +1756,9 @@ class Game:
                     self._draw_text("CAMPFIRE COGNIZANCE HUD", 130, 455, (238, 206, 112))
                     self._draw_text("Stand adjacent to fire and press E to Rest | ESC to pack up", 130, 490, (245, 245, 245))
                     
-                    hp_status = f"Player HP: {self.player_hp}/100"
+                    hp_status = f"Player (Lv. {self.player_level}) HP: {self.player_hp}/{self.player_max_hp} (EXP: {self.player_exp}/{self.exp_to_next_level})"
                     if self.saif_recruited:
-                        hp_status += f"  |  Saif HP: {self.saif_hp}/100 (Respect: {self.saif_respect}/100)"
+                        hp_status += f"  |  Saif (Lv. {self.saif_level}) HP: {self.saif_hp}/{self.saif_max_hp} (EXP: {self.saif_exp}/{self.saif_exp_to_next_level}) (Respect: {self.saif_respect}/100)"
                     self._draw_text(hp_status, 130, 520, (30, 144, 255))
                     self._draw_text(f"Potions: {self.inventory.get('health_potion', 0)}", 130, 545, (238, 206, 112))
                     
@@ -1925,6 +2077,24 @@ class Game:
                 for idx, line in enumerate(lines[:4]):
                     self._draw_text(line, 270, 460 + idx * 28, (245, 245, 245))
                     
+            elif self.combat_mode == 'victory':
+                self._draw_text("VICTORY!", 270, 410, (255, 215, 0))
+                self._draw_text("Gained 50 EXP", 270, 440, (30, 144, 255))
+                
+                # Render level-ups (stacking dynamically)
+                y_offset = 470
+                if self.levelled_up:
+                    self._draw_text(f"Player Lv. Up! Reached Lv. {self.player_level}", 270, y_offset, (46, 139, 87))
+                    y_offset += 25
+                if self.saif_recruited and self.saif_levelled_up:
+                    self._draw_text(f"Saif Lv. Up! Reached Lv. {self.saif_level}", 270, y_offset, (46, 139, 87))
+                    y_offset += 25
+                
+                if not self.levelled_up and not (self.saif_recruited and self.saif_levelled_up):
+                    self._draw_text("Press ENTER to continue", 270, 520, (100, 100, 110))
+                else:
+                    self._draw_text("Press ENTER to continue", 270, 550, (100, 100, 110))
+                    
             elif self.combat_mode == 'special':
                 self._draw_text("SPECIAL MOVES", 270, 420, (238, 206, 112))
                 
@@ -1960,15 +2130,25 @@ class Game:
             self._draw_text("PARTY STATUS", 560, 410, (238, 206, 112))
             
             # Player HP Bar
-            self._draw_text(f"PLAYER HP: {self.player_hp}/100", 560, 440, (30, 144, 255))
-            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 462, 200, 8))
-            pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(560, 462, int(200 * (self.player_hp / 100.0)), 8))
+            self._draw_text(f"PLAYER LV. {self.player_level} HP: {self.player_hp}/{self.player_max_hp}", 560, 425, (30, 144, 255))
+            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 445, 200, 6))
+            pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(560, 445, int(200 * (self.player_hp / self.player_max_hp)), 6))
+            
+            # Player EXP Bar
+            self._draw_text(f"EXP: {self.player_exp}/{self.exp_to_next_level}", 560, 455, (200, 200, 200))
+            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 475, 200, 4))
+            pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(560, 475, int(200 * (self.player_exp / self.exp_to_next_level)), 4))
             
             # Saif HP and Respect Bars (only if recruited)
             if self.saif_recruited:
-                self._draw_text(f"SAIF HP: {self.saif_hp}/100", 560, 490, (46, 139, 87))
-                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 512, 200, 8))
-                pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(560, 512, int(200 * (self.saif_hp / 100.0)), 8))
+                self._draw_text(f"SAIF LV. {self.saif_level} HP: {self.saif_hp}/{self.saif_max_hp}", 560, 485, (46, 139, 87))
+                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 505, 200, 6))
+                pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(560, 505, int(200 * (self.saif_hp / self.saif_max_hp)), 6))
+                
+                # Saif EXP Bar
+                self._draw_text(f"EXP: {self.saif_exp}/{self.saif_exp_to_next_level}", 560, 515, (200, 200, 200))
+                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 535, 200, 4))
+                pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(560, 535, int(200 * (self.saif_exp / self.saif_exp_to_next_level)), 4))
                 
                 # Saif Respect Meter (shows red DEFIANT status if respect < 50)
                 respect_color = (218, 165, 32)
@@ -1977,9 +2157,9 @@ class Game:
                     respect_color = (220, 20, 60) # Flashing/Steady Red
                     respect_label += " [DEFIANT]"
                 
-                self._draw_text(respect_label, 560, 540, respect_color)
-                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 562, 200, 8))
-                pygame.draw.rect(self.screen, respect_color, pygame.Rect(560, 562, int(200 * (self.saif_respect / 100.0)), 8))
+                self._draw_text(respect_label, 560, 545, respect_color)
+                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 565, 200, 6))
+                pygame.draw.rect(self.screen, respect_color, pygame.Rect(560, 565, int(200 * (self.saif_respect / 100.0)), 6))
                 
             # Draw potions count in Column 3
             self._draw_text(f"POTIONS: {self.inventory.get('health_potion', 0)}", 560, 580, (238, 206, 112))
