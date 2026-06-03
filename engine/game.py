@@ -4,6 +4,7 @@ import random
 import json
 import os
 import math
+import threading
 from engine.player import Player
 from engine.enemy import Enemy
 from engine.chest import Chest
@@ -210,6 +211,7 @@ class Game:
         self.combo_damage_applied = False
         self.enemy_damage_dealt = False
         self.combo_cooldown = 0
+        self.saif_defending = False
 
     def _adjust_respect(self, change: int):
         """
@@ -250,6 +252,7 @@ class Game:
         self.combo_damage_applied = False
         self.enemy_damage_dealt = False
         self.combo_cooldown = 0
+        self.saif_defending = False
         
         # Clear VFX state
         self.floating_texts = []
@@ -307,6 +310,7 @@ class Game:
                 self.menu_index = 0
                 self.combat_mode = 'menu'
                 self.menu_options = ['Attack', 'Special', 'Item', 'Flee']
+                self.saif_defending = False
                 print("[Combat] Saif's Turn!")
             else:
                 self._start_enemy_turn()
@@ -345,6 +349,86 @@ class Game:
                 "timer": 45
             })
             print(f"[Combat] Attack executed! Damage: {damage}. Enemy HP: {self.enemy_hp}")
+
+    def _trigger_saif_defiance(self, commanded_action: str):
+        """
+        Triggers Saif's defiance check failure.
+        Chooses a rogue action (Self-Heal if potion is available, else Defend).
+        Plays feedback sound/VFX, starts async excuse loading thread.
+        """
+        potions = self.inventory.get("health_potion", 0)
+        if potions > 0:
+            action_name = "Self-Heal"
+            self.inventory["health_potion"] = potions - 1
+            self.saif_hp = min(self.saif_max_hp, self.saif_hp + 50)
+            
+            # Spawn green healing text
+            self.floating_texts.append({
+                "text": "+50 HP",
+                "x": self.saif_combat_pos[0] + self.player.size // 2,
+                "y": self.saif_combat_pos[1],
+                "timer": 90,
+                "color": (46, 139, 87)
+            })
+            print(f"[Combat] Saif disobeyed and used a Potion! Saif HP: {self.saif_hp}")
+        else:
+            action_name = "Defend"
+            self.saif_defending = True
+            print("[Combat] Saif disobeyed and defended!")
+            
+        # Spawn Crimson Red "REFUSED!" floating text
+        self.floating_texts.append({
+            "text": "REFUSED!",
+            "x": self.saif_combat_pos[0] + self.player.size // 2,
+            "y": self.saif_combat_pos[1] - 20,
+            "timer": 90,
+            "color": (220, 20, 60)
+        })
+        
+        # Audio / Screen shake feedback
+        self.sound_manager.play_sfx("menu_select")
+        self.screen_shake_frames = 15
+        
+        # UI State
+        self.combat_mode = 'talk_response'
+        self.talk_response_text = "..."
+        self.talk_response_start_time = pygame.time.get_ticks()
+        
+        # Start async excuse query in a daemon thread
+        t = threading.Thread(target=self._async_fetch_defiance_excuse, args=(action_name,))
+        t.daemon = True
+        t.start()
+
+    def _async_fetch_defiance_excuse(self, action_name: str):
+        """
+        Background task to call generate_llm_response for Saif's defiance excuse.
+        Updates self.talk_response_text once completed.
+        """
+        prompt = f"[System Note: You have just refused the player's command and instead chose to {action_name}. Speak as Saif and give a brief, direct, one-sentence excuse as to why you chose this action instead of obeying. Do not use poetic metaphors about the desert, sand, or the sun.]"
+        game_state = {
+            "player_hp": self.player_hp,
+            "enemy_hp": self.enemy_hp,
+            "saif_respect": self.saif_respect,
+            "saif_hp": self.saif_hp,
+            "chat_history": self.chat_history,
+            "in_combat": True,
+            "current_location": self.current_location,
+            "llm_provider": self.llm_provider,
+            "ollama_model": self.ollama_model,
+            "ollama_url": self.ollama_url,
+            "api_base_url": self.api_base_url,
+            "api_model": self.api_model,
+            "llm_think": self.llm_think
+        }
+        try:
+            res_dict = generate_llm_response(prompt, game_state)
+            dialogue = res_dict.get("dialogue", "I'm doing things my way.")
+        except Exception as e:
+            print(f"[LLM Thread] Error fetching excuse: {e}")
+            dialogue = "Covering my flank makes more sense right now."
+            
+        self.talk_response_text = dialogue
+        self.talk_response_start_time = pygame.time.get_ticks()
 
     def _end_battle_victory(self):
         """
@@ -1167,13 +1251,19 @@ class Game:
                     self.player_attack_start_time = pygame.time.get_ticks()
                     self.player_damage_dealt = False
                     self.is_combo_attack = False
+                    self.combat_mode = 'menu'
+                    self.menu_index = 0
                 elif self.combat_turn == 'saif':
-                    self.saif_attack_active = True
-                    self.saif_attack_start_time = pygame.time.get_ticks()
-                    self.saif_damage_dealt = False
-                    self.is_combo_attack = False
-                self.combat_mode = 'menu'
-                self.menu_index = 0
+                    defiance_check = random.randint(1, 100)
+                    if defiance_check > self.saif_respect:
+                        self._trigger_saif_defiance("Attack")
+                    else:
+                        self.saif_attack_active = True
+                        self.saif_attack_start_time = pygame.time.get_ticks()
+                        self.saif_damage_dealt = False
+                        self.is_combo_attack = False
+                        self.combat_mode = 'menu'
+                        self.menu_index = 0
 
             elif selected_option == 'Special':
                 self.combat_mode = 'special'
@@ -1200,6 +1290,12 @@ class Game:
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             # Try to trigger Combo Strike
             if self.saif_recruited and self.saif_respect >= 70 and self.combo_cooldown == 0:
+                if self.combat_turn == 'saif':
+                    defiance_check = random.randint(1, 100)
+                    if defiance_check > self.saif_respect:
+                        self._trigger_saif_defiance("Special Combo")
+                        return
+                
                 print("[Combat] Coordinated X-Strike combo initiated!")
                 self.combat_mode = 'menu'
                 self.menu_index = 0
@@ -1342,6 +1438,7 @@ class Game:
                     self.combo_damage_applied = False
                     self.enemy_damage_dealt = False
                     self.combo_cooldown = 0
+                    self.saif_defending = False
                     
                     # Clear VFX State
                     self.floating_texts = []
@@ -1392,11 +1489,14 @@ class Game:
                 if now - self.victory_start_time >= 4000:
                     self._end_battle_victory()
             # Handle response delay timer (4 seconds)
-            elif self.combat_turn == 'player' and self.combat_mode == 'talk_response':
+            elif self.combat_turn in ('player', 'saif') and self.combat_mode == 'talk_response':
                 now = pygame.time.get_ticks()
-                if now - self.talk_response_start_time >= 4000:
-                    self.combat_mode = 'menu'
-                    self._end_current_turn()
+                if self.talk_response_text != "...":
+                    if now - self.talk_response_start_time >= 4000:
+                        self.combat_mode = 'menu'
+                        self._end_current_turn()
+                else:
+                    self.talk_response_start_time = now
                     
             elif self.combat_turn == 'enemy' and self.enemy_attack_active:
                 now = pygame.time.get_ticks()
@@ -1448,11 +1548,12 @@ class Game:
                         # Saif was targeted: parry is skipped
                         print("Saif took damage!")
                         self.sound_manager.play_sfx("hit")
-                        self.saif_hp = max(0, self.saif_hp - 20)
+                        damage = 10 if self.saif_defending else 20
+                        self.saif_hp = max(0, self.saif_hp - damage)
                         self._save_game_state()
                         # Spawn Saif damage floating text
                         self.floating_texts.append({
-                            "text": "-20",
+                            "text": f"-{damage}",
                             "x": self.saif_combat_pos[0] + self.player.size // 2,
                             "y": self.saif_combat_pos[1],
                             "timer": 45
@@ -2178,7 +2279,8 @@ class Game:
             # Render and update floating texts in the combat state
             next_floating_texts = []
             for ft in self.floating_texts:
-                self._draw_text(ft["text"], ft["x"], ft["y"], color=(238, 206, 112), center=True)
+                color = ft.get("color", (238, 206, 112))
+                self._draw_text(ft["text"], ft["x"], ft["y"], color=color, center=True)
                 ft["y"] -= 1
                 ft["timer"] -= 1
                 if ft["timer"] > 0:

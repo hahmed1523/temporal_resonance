@@ -263,12 +263,14 @@ def extract_json_payload(raw_text: str) -> dict:
 def _build_system_prompt(saif_respect: int, player_hp: int, enemy_hp: int,
                          in_combat: bool, current_location: str = "overworld") -> str:
     """Build the character system prompt with dynamic game state injection."""
+    core_desc = "You are Saif, a weary, pragmatic, and tactical warrior. Speak conversationally and directly. NEVER use poetic metaphors about the desert, sand, or the sun. Do not be overly dramatic. Use modern, grounded syntax."
+    
     if current_location == 'combat':
-        context = f"You are Saif, an Arabian Desert Guardian. You are currently in a deadly battle. Keep your words sharp, tactical, and focused on survival. Your respect for the player is {saif_respect}/100."
+        context = f"{core_desc} You are currently in a deadly battle. Keep your words sharp, tactical, and focused on survival. Your respect for the player is {saif_respect}/100."
     elif current_location == 'camp':
-        context = f"You are Saif, an Arabian Desert Guardian. You are currently resting safely at camp by a warm fire. The danger has passed. You are relaxed, reflective, and much more open to sharing deep lore, your history, and your personal thoughts. Your respect for the player is {saif_respect}/100."
+        context = f"{core_desc} You are currently resting safely at camp by a warm fire. The danger has passed. You are relaxed, reflective, and much more open to sharing deep lore, your history, and your personal thoughts. Your respect for the player is {saif_respect}/100."
     else: # 'overworld'
-        context = f"You are Saif, an Arabian Desert Guardian. You are currently exploring the dangerous overworld. You are cautious and watching for ambushes. Your respect for the player is {saif_respect}/100."
+        context = f"{core_desc} You are currently exploring the dangerous overworld. You are cautious and watching for ambushes. Your respect for the player is {saif_respect}/100."
 
     rules = (
         "\n\nRespond in 1 or 2 short sentences, staying in character.\n\n"
@@ -440,6 +442,17 @@ def _heuristic_response(player_text: str) -> dict:
     """
     text_lower = player_text.lower()
 
+    # Special handling for Saif's defiance/disobedience excuse
+    if "refuse" in text_lower or "defiance" in text_lower or "excuse" in text_lower or "disobey" in text_lower:
+        if "heal" in text_lower or "potion" in text_lower:
+            dialogue = "I need to stay on my feet to finish this. The potion was necessary."
+        else:
+            dialogue = "Covering my flank makes more sense than a blind charge right now."
+        return {
+            "dialogue": f"[Offline] {dialogue}",
+            "respect_change": 0
+        }
+
     positive_words = [
         "leader", "trust", "stay", "protect", "help", "friend",
         "believe", "save", "together", "honor", "brave", "fight",
@@ -455,13 +468,13 @@ def _heuristic_response(player_text: str) -> dict:
     neg_score = sum(1 for w in negative_words if w in text_lower)
 
     if pos_score > neg_score:
-        dialogue = "I... I want to protect you, but the desert has taken so much. Perhaps your words have truth."
+        dialogue = "I want to support you, but I have seen too many battles. Perhaps your words have truth."
         respect_change = 10
     elif neg_score > pos_score:
-        dialogue = "Do you think I do not know my own failures? Your accusations burn like the desert sun!"
+        dialogue = "Do you think I do not know my own failures? Your accusations cut deep!"
         respect_change = -10
     else:
-        dialogue = "The sands of time offer no easy answers. We must watch our step."
+        dialogue = "This path offers no easy answers. We must watch our step."
         respect_change = 0
 
     return {
