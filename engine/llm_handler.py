@@ -578,9 +578,9 @@ def generate_llm_response(player_text: str, game_state: dict) -> dict:
     return _heuristic_response(player_text)
 
 
-def fetch_refusal_dialogue(game_state: dict) -> list:
+def fetch_refusal_dialogue(game_state: dict, recent_chat: list = None) -> list:
     """
-    Queries the configured LLM provider to fetch a JSON list of 3 combat excuses.
+    Queries the configured LLM provider to fetch a JSON list of 2 combat excuses.
     Returns a list of strings on success, or an offline fallback list on failure.
     """
     provider = game_state.get("llm_provider", "ollama")
@@ -589,12 +589,29 @@ def fetch_refusal_dialogue(game_state: dict) -> list:
     api_base_url = game_state.get("api_base_url", "https://generativelanguage.googleapis.com/v1beta/openai")
     api_model = game_state.get("api_model", "gemini-2.5-flash")
     api_key = os.environ.get("API_KEY", "")
+    saif_respect = game_state.get("saif_respect", 50)
     
+    if recent_chat is None:
+        recent_chat = game_state.get("chat_history", [])[-3:]
+    
+    # Format chat history
+    history_str = ""
+    if recent_chat:
+        for exchange in recent_chat:
+            if len(exchange) == 2:
+                history_str += f'Player: "{exchange[0]}"\nSaif: "{exchange[1]}"\n'
+        history_str = history_str.strip()
+
     system_prompt = (
-        "You are Saif, a weary, pragmatic, and tactical warrior. Speak conversationally and directly. "
+        "You are Saif (or the active party member), a weary, pragmatic, and tactical warrior. Speak conversationally and directly. "
         "NEVER use poetic metaphors about the desert, sand, or the sun. Do not be overly dramatic. Use modern, grounded syntax. "
-        "Generate a JSON array of exactly 3 short, punchy, gritty combat excuses for refusing an order "
-        "(e.g., [\"Bad call. I am defending.\", \"Watch your own back.\"]). "
+        f"Your respect for the player is currently {saif_respect}/100. "
+        "Generate a JSON array of 2 short combat excuses for refusing an order. "
+        f"Consider this recent chat history: [{history_str}]. "
+        "If the player was mean, hold a grudge. If they were kind, be pragmatic. "
+        "You MUST directly reference or incorporate details from the recent conversation history in your refusal responses "
+        "if it is relevant to your refusal or your relationship with the player (for instance, if the player has been "
+        "insulting, threatening, nice, or supportive, let that directly inform the tone, attitude, and reasons in your excuses). "
         "Do NOT include thinking tags or other markdown formatting. Return ONLY the raw JSON array."
     )
     
@@ -605,7 +622,7 @@ def fetch_refusal_dialogue(game_state: dict) -> list:
             "model": ollama_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "Generate the JSON array of 3 excuses."}
+                {"role": "user", "content": "Generate the JSON array of 2 excuses."}
             ],
             "format": "json",
             "stream": False,
@@ -633,7 +650,7 @@ def fetch_refusal_dialogue(game_state: dict) -> list:
                 "model": api_model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Generate the JSON array of 3 excuses."}
+                    {"role": "user", "content": "Generate the JSON array of 2 excuses."}
                 ],
                 "temperature": 0.7,
                 "response_format": {"type": "json_object"}
@@ -670,6 +687,165 @@ def fetch_refusal_dialogue(game_state: dict) -> list:
             
     return [
         "Covering my flank makes more sense right now.",
-        "I need to stay on my feet. Potion was necessary.",
-        "Not throwing my life away on a reckless order."
+        "Watch your own back."
     ]
+
+
+def prewarm_llm(game_state: dict) -> bool:
+    """
+    Makes a lightweight, asynchronous handshake call to load the model into memory/VRAM.
+    Returns True if completed (success or failure).
+    """
+    provider = game_state.get("llm_provider", "ollama")
+    ollama_model = game_state.get("ollama_model", "gemma4:e4b")
+    ollama_url = game_state.get("ollama_url", "http://localhost:11434")
+    api_base_url = game_state.get("api_base_url", "https://generativelanguage.googleapis.com/v1beta/openai")
+    api_model = game_state.get("api_model", "gemini-2.5-flash")
+    api_key = os.environ.get("API_KEY", "")
+    
+    system_prompt = "You are a game engine handshake agent. Respond with only 'OK' and nothing else."
+    
+    if provider == "ollama":
+        url = f"{ollama_url.rstrip('/')}/api/chat"
+        payload = {
+            "model": ollama_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Hello"}
+            ],
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 5}
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=20) as response:
+                response.read()
+                print("[LLM Prewarm] Ollama pre-warming complete.")
+                return True
+        except Exception as e:
+            print(f"[LLM Prewarm] Ollama pre-warming handshake failed/skipped: {e}")
+            return False
+    elif provider == "api":
+        if not api_key:
+            print("[LLM Prewarm] API key not configured. Skipping prewarm.")
+            return False
+        url = f"{api_base_url.rstrip('/')}/v1/chat/completions"
+        payload = {
+            "model": api_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Hello"}
+            ],
+            "max_tokens": 5,
+            "temperature": 0.1
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=20) as response:
+                response.read()
+                print("[LLM Prewarm] API pre-warming complete.")
+                return True
+        except Exception as e:
+            print(f"[LLM Prewarm] API pre-warming handshake failed/skipped: {e}")
+            return False
+    return False
+
+
+def wake_up_llm(player_level: int = 1, config: dict = None) -> str:
+    """
+    Sends a tiny prompt to warm up the LLM and verify it's awake:
+    'The player is at level [player_level] and just booted the game. Give a 5-word greeting.'
+    Prints the response to the terminal.
+    """
+    if config is None:
+        state_file = os.path.join("data", "game_state.json")
+        config = {}
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r") as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+                
+    provider = config.get("llm_provider", "ollama")
+    ollama_model = config.get("ollama_model", "gemma4:e4b")
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    api_base_url = config.get("api_base_url", "https://generativelanguage.googleapis.com/v1beta/openai")
+    api_model = config.get("api_model", "gemini-2.5-flash")
+    api_key = os.environ.get("API_KEY", "")
+    
+    prompt = f"The player is at level {player_level} and just booted the game. Give a 5-word greeting."
+    
+    raw_text = None
+    if provider == "ollama":
+        url = f"{ollama_url.rstrip('/')}/api/chat"
+        payload = {
+            "model": ollama_model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False,
+            "options": {"temperature": 0.7, "num_predict": 15}
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=15) as response:
+                res_body = response.read().decode("utf-8")
+                res_json = json.loads(res_body)
+                raw_text = res_json.get("message", {}).get("content", "").strip()
+        except Exception as e:
+            raw_text = f"Ollama wakeup failed: {e}"
+    elif provider == "api":
+        if not api_key:
+            raw_text = "API key not configured."
+        else:
+            url = f"{api_base_url.rstrip('/')}/v1/chat/completions"
+            payload = {
+                "model": api_model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 15,
+                "temperature": 0.7
+            }
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}"
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    res_body = response.read().decode("utf-8")
+                    res_json = json.loads(res_body)
+                    raw_text = res_json["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                raw_text = f"API wakeup failed: {e}"
+                
+    if raw_text:
+        print(f"[LLM Wakeup] Handshake response: {raw_text}")
+        return raw_text
+    return "Handshake failed."
+
+

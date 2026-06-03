@@ -106,6 +106,23 @@ def main():
         map_grid=DEFAULT_MAP_GRID
     )
     
+    # Fire off LLM wakeup handshake in background (MainMenu state initialization)
+    try:
+        import threading
+        from engine.llm_handler import wake_up_llm
+        player_level = 1
+        state_file = os.path.join("data", "game_state.json")
+        if os.path.exists(state_file):
+            with open(state_file, "r") as f:
+                state_data = json.load(f)
+                player_level = state_data.get("player_level", 1)
+        
+        t = threading.Thread(target=wake_up_llm, args=(player_level,))
+        t.daemon = True
+        t.start()
+    except Exception as e:
+        print(f"[Warning] Failed to start LLM wakeup thread: {e}")
+    
     # Start the core game loop
     game.run()
 

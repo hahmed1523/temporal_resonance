@@ -10,7 +10,7 @@ from engine.enemy import Enemy
 from engine.chest import Chest
 from engine.sound_manager import SoundManager
 
-from engine.llm_handler import generate_llm_response, save_api_key_to_env, fetch_refusal_dialogue
+from engine.llm_handler import generate_llm_response, save_api_key_to_env, fetch_refusal_dialogue, prewarm_llm
 from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE, CAMP_MAP_GRID
 
 
@@ -83,6 +83,16 @@ class Game:
         
         # Initialize Game State
         self.state = 'main_menu_state'
+        
+        # Loader & Transition State Variables
+        self.load_progress = 0.0
+        self.load_target_state = 'exploration_state'
+        self.prewarm_thread = None
+        self.prewarm_complete = False
+        self.prewarm_success = False
+        self.transition_elapsed = 0.0
+        self.spiral_coords = []
+        self.transition_spiral_total = 0
         
         # Main Menu State Variables
         self.main_menu_index = 0
@@ -363,6 +373,11 @@ class Game:
         """
         print("[LLM Buffer] Refilling refusal queue in background...")
         game_state = {
+            "player_hp": self.player_hp,
+            "enemy_hp": self.enemy_hp,
+            "saif_respect": self.saif_respect,
+            "saif_hp": self.saif_hp,
+            "chat_history": self.chat_history,
             "llm_provider": self.llm_provider,
             "ollama_model": self.ollama_model,
             "ollama_url": self.ollama_url,
@@ -378,9 +393,11 @@ class Game:
         """
         Background task executing fetch_refusal_dialogue and appending responses to self.saif_refusal_queue.
         """
-        excuses = fetch_refusal_dialogue(game_state)
+        recent_chat = game_state.get("chat_history", [])[-3:]
+        excuses = fetch_refusal_dialogue(game_state, recent_chat)
         if excuses:
             self.saif_refusal_queue.extend(excuses)
+            self.saif_refusal_queue = self.saif_refusal_queue[:3]
             self._save_game_state()
             print(f"[LLM Buffer] Refilled refusal queue. Current size: {len(self.saif_refusal_queue)}")
 
@@ -634,7 +651,7 @@ class Game:
                     self.api_model = data.get("api_model", self.api_model)
                     self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
-                    self.saif_refusal_queue = data.get("saif_refusal_queue", [])
+                    self.saif_refusal_queue = data.get("saif_refusal_queue", [])[:3]
                     self.current_location = data.get("current_location", "overworld")
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
@@ -800,7 +817,7 @@ class Game:
                     self.api_model = data.get("api_model", self.api_model)
                     self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
-                    self.saif_refusal_queue = data.get("saif_refusal_queue", [])
+                    self.saif_refusal_queue = data.get("saif_refusal_queue", [])[:3]
                     self.player.x = data.get("player_x", 960)
                     self.player.y = data.get("player_y", 1040)
                     self.camera_x = data.get("camera_x", 0.0)
@@ -1087,30 +1104,73 @@ class Game:
             selection = self.main_menu_options[self.main_menu_index]
             
             if selection == "New Game":
-                    from main import reset_game_state
-                    reset_game_state() # Overwrites game_state.json with defaults
-                    self._load_game_state() # Load defaults in memory
-                    
-                    # Reset physical map cells (close chest)
-                    if self.chest_x is not None:
-                        c_idx = int(self.chest_x // self.tile_size)
-                        r_idx = int(self.chest_y // self.tile_size)
-                        self.map_grid[r_idx][c_idx] = 2
-                    
-                    self.map_grid = self.overworld_map_grid
-                    self.current_location = "overworld"
-                    self.player.x, self.player.y = 960, 1040 # Reset starting position
-                    self.enemy_hp = 100
-                    self.player_hp = self.player_max_hp
-                    self.saif_hp = self.saif_max_hp
-                    self._update_camera()
-                    self.state = 'exploration_state'
-                    print("[System] Started New Game.")
+                from main import reset_game_state
+                reset_game_state() # Overwrites game_state.json with defaults
+                self._load_game_state() # Load defaults in memory
+                
+                # Reset physical map cells (close chest)
+                if self.chest_x is not None:
+                    c_idx = int(self.chest_x // self.tile_size)
+                    r_idx = int(self.chest_y // self.tile_size)
+                    self.map_grid[r_idx][c_idx] = 2
+                
+                self.map_grid = self.overworld_map_grid
+                self.current_location = "overworld"
+                self.player.x, self.player.y = 960, 1040 # Reset starting position
+                self.enemy_hp = 100
+                self.player_hp = self.player_max_hp
+                self.saif_hp = self.saif_max_hp
+                self._update_camera()
+                
+                # Switch to loader state
+                self.state = 'game_load_state'
+                self.load_progress = 0.0
+                self.prewarm_complete = False
+                self.prewarm_success = False
+                
+                # Spawn pre-warm thread
+                game_state = {
+                    "llm_provider": self.llm_provider,
+                    "ollama_model": self.ollama_model,
+                    "ollama_url": self.ollama_url,
+                    "api_base_url": self.api_base_url,
+                    "api_model": self.api_model
+                }
+                def run_prewarm():
+                    self.prewarm_success = prewarm_llm(game_state)
+                    self.prewarm_complete = True
+                
+                self.prewarm_thread = threading.Thread(target=run_prewarm)
+                self.prewarm_thread.daemon = True
+                self.prewarm_thread.start()
+                print("[System] Started New Game. Pre-warming LLM...")
             
             elif selection == "Continue":
                 if os.path.exists(self.save_slot_file):
                     self._load_from_save_slot_1()
-                    self.state = 'exploration_state'
+                    
+                    # Switch to loader state
+                    self.state = 'game_load_state'
+                    self.load_progress = 0.0
+                    self.prewarm_complete = False
+                    self.prewarm_success = False
+                    
+                    # Spawn pre-warm thread
+                    game_state = {
+                        "llm_provider": self.llm_provider,
+                        "ollama_model": self.ollama_model,
+                        "ollama_url": self.ollama_url,
+                        "api_base_url": self.api_base_url,
+                        "api_model": self.api_model
+                    }
+                    def run_prewarm():
+                        self.prewarm_success = prewarm_llm(game_state)
+                        self.prewarm_complete = True
+                    
+                    self.prewarm_thread = threading.Thread(target=run_prewarm)
+                    self.prewarm_thread.daemon = True
+                    self.prewarm_thread.start()
+                    print("[System] Continuing Game. Pre-warming LLM...")
                 else:
                     self.no_save_message_time = pygame.time.get_ticks()
                     print("[System] No save file found.")
@@ -1443,47 +1503,97 @@ class Game:
             # Check collision with overworld enemy only in exploration state
             if self.state == 'exploration_state':
                 if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
-                    self.state = 'combat_state'
-                    self.current_location = 'combat'
-                    self.combat_mode = 'menu'
-                    self.combat_turn = 'player'
-                    self.menu_index = 0
-                    if self.saif_recruited:
-                        self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
-                    else:
-                        self.menu_options = ['Attack', 'Item', 'Flee']
+                    self.state = 'combat_transition_state'
+                    self.transition_elapsed = 0.0
                     
+                    # Pre-calculate spiral coordinates for transition effect (cols: 20, rows: 15)
+                    cols, rows = 20, 15
+                    self.spiral_coords = []
+                    left, right = 0, cols - 1
+                    top, bottom = 0, rows - 1
+                    while left <= right and top <= bottom:
+                        # Top row
+                        for col in range(left, right + 1):
+                            self.spiral_coords.append((col, top))
+                        top += 1
+                        # Right column
+                        for row in range(top, bottom + 1):
+                            self.spiral_coords.append((right, row))
+                        right -= 1
+                        # Bottom row
+                        if top <= bottom:
+                            for col in range(right, left - 1, -1):
+                                self.spiral_coords.append((col, bottom))
+                            bottom -= 1
+                        # Left column
+                        if left <= right:
+                            for row in range(bottom, top - 1, -1):
+                                self.spiral_coords.append((left, row))
+                            left += 1
+                    self.transition_spiral_total = len(self.spiral_coords)
+                    
+                    # Trigger background refill thread immediately!
                     self._trigger_refusal_queue_refill()
-                    
-                    # Reset animation and position variables
-                    self.player_combat_current_pos = list(self.player_combat_pos)
-                    self.saif_combat_current_pos = list(self.saif_combat_pos)
-                    self.player_attack_active = False
-                    self.saif_attack_active = False
-                    self.player_damage_dealt = False
-                    self.saif_damage_dealt = False
-                    self.is_combo_attack = False
-                    self.combo_damage_applied = False
-                    self.enemy_damage_dealt = False
-                    self.combo_cooldown = 0
-                    self.saif_defending = False
-                    self.saif_excuse_active = False
-                    self.saif_excuse_text = ""
-                    self.saif_excuse_load_time = None
-                    
-                    # Clear VFX State
-                    self.floating_texts = []
-                    self.screen_shake_frames = 0
-                    self.enemy_flash_frames = 0
-                    self.player_flash_frames = 0
-                    self.saif_flash_frames = 0
-                    self.player_recoil_frames = 0
-                    self.saif_recoil_frames = 0
-                    
-                    print("Battle Started!")
+                    print("Combat Collision! Starting Battle Transition...")
                 
             # Keep camera centered on player
             self._update_camera()
+
+        elif self.state == 'combat_transition_state':
+            self.transition_elapsed += dt
+            # Transition loops until refusal queue has at least 1 excuse or 3.0s failsafe timeout passes
+            if len(self.saif_refusal_queue) > 0 or self.transition_elapsed >= 3.0:
+                # Transition to combat_state
+                self.state = 'combat_state'
+                self.current_location = 'combat'
+                self.combat_mode = 'menu'
+                self.combat_turn = 'player'
+                self.menu_index = 0
+                if self.saif_recruited:
+                    self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
+                else:
+                    self.menu_options = ['Attack', 'Item', 'Flee']
+                
+                # Reset animation and position variables
+                self.player_combat_current_pos = list(self.player_combat_pos)
+                self.saif_combat_current_pos = list(self.saif_combat_pos)
+                self.player_attack_active = False
+                self.saif_attack_active = False
+                self.player_damage_dealt = False
+                self.saif_damage_dealt = False
+                self.is_combo_attack = False
+                self.combo_damage_applied = False
+                self.enemy_damage_dealt = False
+                self.combo_cooldown = 0
+                self.saif_defending = False
+                self.saif_excuse_active = False
+                self.saif_excuse_text = ""
+                self.saif_excuse_load_time = None
+                
+                # Clear VFX State
+                self.floating_texts = []
+                self.screen_shake_frames = 0
+                self.enemy_flash_frames = 0
+                self.player_flash_frames = 0
+                self.saif_flash_frames = 0
+                self.player_recoil_frames = 0
+                self.saif_recoil_frames = 0
+                
+                print("Battle Started!")
+
+        elif self.state == 'game_load_state':
+            # Smooth load progress update
+            self.load_progress += 45.0 * dt
+            # If pre-warming is not complete yet, pause at 95%
+            if self.load_progress >= 95.0 and not self.prewarm_complete:
+                self.load_progress = 95.0
+            
+            # Let it run to 100% once pre-warming is complete
+            if self.prewarm_complete and self.load_progress >= 95.0:
+                self.load_progress = min(100.0, self.load_progress + 120.0 * dt)
+                
+            if self.load_progress >= 100.0:
+                self.state = 'exploration_state'
             
         # Peaceful dialogue response resolution timer
         elif self.state == 'dialogue_state' and self.combat_mode == 'talk_response':
@@ -1773,7 +1883,7 @@ class Game:
             # Version/Info
             self._draw_text("Use UP/DOWN to navigate | ENTER to select", self.width // 2, 550, (100, 100, 110), center=True)
             
-        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state'):
+        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state', 'combat_transition_state'):
             # Render solid grey walls from map grid first with frustum culling
             if self.map_grid:
                 tile_size = self.tile_size
@@ -1833,8 +1943,6 @@ class Game:
                     pygame.draw.rect(self.screen, (101, 67, 33), pygame.Rect(screen_x + 5, screen_y + 15, 30, 10))
                     pygame.draw.rect(self.screen, (101, 67, 33), pygame.Rect(screen_x + 15, screen_y + 5, 10, 30))
                     
-                    # Flickering animation using sine wave
-                    import math
                     flicker = int(math.sin(pygame.time.get_ticks() / 80) * 4)
                     # Outer red/orange glow
                     pygame.draw.circle(self.screen, (255, 69, 0), (screen_x + 20, screen_y + 20), 18 + flicker)
@@ -1994,6 +2102,27 @@ class Game:
                 # Toast notification
                 if pygame.time.get_ticks() - self.save_confirmed_time < 2000:
                     self._draw_text("Game Saved Successfully!", self.width // 2, 395, (46, 139, 87), center=True)
+
+            # Draw the retro combat transition spiral overlay on top of the overworld render
+            if self.state == 'combat_transition_state':
+                # Loop the spiral transition wipe animation every 1.5 seconds
+                t_loop = self.transition_elapsed % 1.5
+                k = int((t_loop / 1.5) * self.transition_spiral_total)
+                k = max(0, min(self.transition_spiral_total, k))
+                
+                for idx in range(k):
+                    col, row = self.spiral_coords[idx]
+                    cell_rect = pygame.Rect(col * 40, row * 40, 40, 40)
+                    
+                    # Burning leading edge (last 6 blocks in the drawn queue)
+                    if idx >= k - 6:
+                        # Draw glowing gold block with a crimson outline
+                        pygame.draw.rect(self.screen, (238, 206, 112), cell_rect)
+                        pygame.draw.rect(self.screen, (220, 20, 60), cell_rect, 2)
+                    else:
+                        # Draw solid dark block with a subtle border
+                        pygame.draw.rect(self.screen, (15, 15, 18), cell_rect)
+                        pygame.draw.rect(self.screen, (28, 28, 34), cell_rect, 1)
             
         elif self.state == 'settings_state':
             # ── LLM Settings Screen ──────────────────────────────────────
@@ -2095,6 +2224,68 @@ class Game:
                 self._draw_text("UP/DOWN: Navigate | ENTER: Select | ESC: Back to Game", 400, 520, (150, 150, 155), center=True)
         
         # Static camp_state renderer removed because camp is now fully 2D and dynamic.
+            
+        elif self.state == 'game_load_state':
+            # Draw title background elements
+            self._draw_prototype_grid()
+            
+            # Draw sleek panel in center
+            panel_rect = pygame.Rect(150, 160, 500, 280)
+            pygame.draw.rect(self.screen, self.panel_color, panel_rect)
+            pygame.draw.rect(self.screen, self.grid_color, panel_rect, 2)
+            
+            # Pulsing Title
+            title_color = (238, 206, 112) # Gold
+            self._draw_text("TEMPORAL RESONANCE", self.width // 2, 190, title_color, center=True)
+            
+            # Custom status text depending on progress
+            status_text = "Calibrating Resonance..."
+            if self.load_progress < 30:
+                status_text = "Initializing core variables..."
+            elif self.load_progress < 60:
+                status_text = "Loading overworld maps..."
+            elif self.load_progress < 95:
+                status_text = "Pre-heating LLM cognitive core..."
+            elif self.load_progress < 100:
+                if not self.prewarm_complete:
+                    status_text = "Warming up local LLM core (takes 5-15s)..."
+                else:
+                    status_text = "LLM core online. Handshake established!"
+            else:
+                status_text = "Temporal connection open!"
+                
+            self._draw_text(status_text, self.width // 2, 240, (200, 200, 210), center=True)
+            
+            # Draw Progress Bar
+            bar_width = 360
+            bar_height = 14
+            bar_x = (self.width - bar_width) // 2
+            bar_y = 290
+            
+            # Background
+            pygame.draw.rect(self.screen, (30, 30, 36), pygame.Rect(bar_x, bar_y, bar_width, bar_height))
+            pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(bar_x, bar_y, bar_width, bar_height), 1)
+            
+            # Fill
+            fill_width = int(bar_width * (self.load_progress / 100.0))
+            if fill_width > 0:
+                pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(bar_x + 1, bar_y + 1, fill_width - 2, bar_height - 2))
+                
+            # Percentage text
+            self._draw_text(f"{int(self.load_progress)}%", self.width // 2, 325, (30, 144, 255), center=True)
+            
+            # Small spinner or micro-animation
+            angle = pygame.time.get_ticks() / 150.0
+            spinner_x = self.width // 2
+            spinner_y = 370
+            spinner_radius = 8
+            dot_x = spinner_x + int(math.cos(angle) * spinner_radius)
+            dot_y = spinner_y + int(math.sin(angle) * spinner_radius)
+            pygame.draw.circle(self.screen, (238, 206, 112), (dot_x, dot_y), 3)
+            pygame.draw.circle(self.screen, (50, 50, 60), (spinner_x, spinner_y), spinner_radius, 1)
+            
+            # Subtitle message
+            self._draw_text("Please wait while cognitive matrices load.", self.width // 2, 410, (100, 100, 110), center=True)
             
         elif self.state == 'combat_state':
             # 1. Draw Player (blue) and Enemy (red) and Saif (green, if recruited) in their combat layouts
