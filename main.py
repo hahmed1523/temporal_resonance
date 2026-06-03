@@ -8,13 +8,8 @@ import sys
 import json
 import os
 
-# Configure SDL to use PulseAudio on WSL2/WSLg for Windows audio passthrough.
-# Also configure PulseAudio latency to prevent crackly/popping audio.
-# These must be set BEFORE pygame is imported.
-os.environ.setdefault("SDL_AUDIODRIVER", "pulseaudio")
-os.environ.setdefault("PULSE_LATENCY_MSEC", "120")
-
 import pygame
+
 
 from engine.game import Game
 from engine.level_maps import DEFAULT_MAP_GRID
