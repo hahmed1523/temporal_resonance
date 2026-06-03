@@ -10,7 +10,7 @@ from engine.enemy import Enemy
 from engine.chest import Chest
 from engine.sound_manager import SoundManager
 
-from engine.llm_handler import generate_llm_response, save_api_key_to_env
+from engine.llm_handler import generate_llm_response, save_api_key_to_env, fetch_refusal_dialogue
 from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE, CAMP_MAP_GRID
 
 
@@ -212,6 +212,10 @@ class Game:
         self.enemy_damage_dealt = False
         self.combo_cooldown = 0
         self.saif_defending = False
+        self.saif_excuse_active = False
+        self.saif_excuse_text = ""
+        self.saif_excuse_load_time = None
+        self.saif_refusal_queue = []
 
     def _adjust_respect(self, change: int):
         """
@@ -253,6 +257,9 @@ class Game:
         self.enemy_damage_dealt = False
         self.combo_cooldown = 0
         self.saif_defending = False
+        self.saif_excuse_active = False
+        self.saif_excuse_text = ""
+        self.saif_excuse_load_time = None
         
         # Clear VFX state
         self.floating_texts = []
@@ -350,11 +357,38 @@ class Game:
             })
             print(f"[Combat] Attack executed! Damage: {damage}. Enemy HP: {self.enemy_hp}")
 
+    def _trigger_refusal_queue_refill(self):
+        """
+        Launches a background daemon thread to query LLM for combat excuses and refill the buffer.
+        """
+        print("[LLM Buffer] Refilling refusal queue in background...")
+        game_state = {
+            "llm_provider": self.llm_provider,
+            "ollama_model": self.ollama_model,
+            "ollama_url": self.ollama_url,
+            "api_base_url": self.api_base_url,
+            "api_model": self.api_model,
+            "llm_think": self.llm_think
+        }
+        t = threading.Thread(target=self._async_fetch_refusal_dialogue, args=(game_state,))
+        t.daemon = True
+        t.start()
+
+    def _async_fetch_refusal_dialogue(self, game_state: dict):
+        """
+        Background task executing fetch_refusal_dialogue and appending responses to self.saif_refusal_queue.
+        """
+        excuses = fetch_refusal_dialogue(game_state)
+        if excuses:
+            self.saif_refusal_queue.extend(excuses)
+            self._save_game_state()
+            print(f"[LLM Buffer] Refilled refusal queue. Current size: {len(self.saif_refusal_queue)}")
+
     def _trigger_saif_defiance(self, commanded_action: str):
         """
         Triggers Saif's defiance check failure.
         Chooses a rogue action (Self-Heal if potion is available, else Defend).
-        Plays feedback sound/VFX, starts async excuse loading thread.
+        Plays feedback sound/VFX, pops pre-fetched excuse instantly from queue.
         """
         potions = self.inventory.get("health_potion", 0)
         if potions > 0:
@@ -389,46 +423,23 @@ class Game:
         self.sound_manager.play_sfx("menu_select")
         self.screen_shake_frames = 15
         
-        # UI State
-        self.combat_mode = 'talk_response'
-        self.talk_response_text = "..."
-        self.talk_response_start_time = pygame.time.get_ticks()
-        
-        # Start async excuse query in a daemon thread
-        t = threading.Thread(target=self._async_fetch_defiance_excuse, args=(action_name,))
-        t.daemon = True
-        t.start()
-
-    def _async_fetch_defiance_excuse(self, action_name: str):
-        """
-        Background task to call generate_llm_response for Saif's defiance excuse.
-        Updates self.talk_response_text once completed.
-        """
-        prompt = f"[System Note: You have just refused the player's command and instead chose to {action_name}. Speak as Saif and give a brief, direct, one-sentence excuse as to why you chose this action instead of obeying. Do not use poetic metaphors about the desert, sand, or the sun.]"
-        game_state = {
-            "player_hp": self.player_hp,
-            "enemy_hp": self.enemy_hp,
-            "saif_respect": self.saif_respect,
-            "saif_hp": self.saif_hp,
-            "chat_history": self.chat_history,
-            "in_combat": True,
-            "current_location": self.current_location,
-            "llm_provider": self.llm_provider,
-            "ollama_model": self.ollama_model,
-            "ollama_url": self.ollama_url,
-            "api_base_url": self.api_base_url,
-            "api_model": self.api_model,
-            "llm_think": self.llm_think
-        }
-        try:
-            res_dict = generate_llm_response(prompt, game_state)
-            dialogue = res_dict.get("dialogue", "I'm doing things my way.")
-        except Exception as e:
-            print(f"[LLM Thread] Error fetching excuse: {e}")
-            dialogue = "Covering my flank makes more sense right now."
+        # Instant Execution
+        if self.saif_refusal_queue:
+            excuse = self.saif_refusal_queue.pop(0)
+            self._save_game_state()
+        else:
+            excuse = 'Not happening.'
             
-        self.talk_response_text = dialogue
-        self.talk_response_start_time = pygame.time.get_ticks()
+        self.saif_excuse_active = True
+        self.saif_excuse_text = excuse
+        self.saif_excuse_load_time = pygame.time.get_ticks()
+        
+        # Auto-Refill Check
+        if len(self.saif_refusal_queue) < 2:
+            self._trigger_refusal_queue_refill()
+
+        # Immediately transition to the next turn (which is the enemy's turn)
+        self._end_current_turn()
 
     def _end_battle_victory(self):
         """
@@ -581,6 +592,7 @@ class Game:
         self.api_model = "gemini-2.5-flash"
         self.llm_think = True
         self.inventory = {"health_potion": 0}
+        self.saif_refusal_queue = []
         self.current_location = "overworld"
         self.player_max_hp = 100
         self.player_level = 1
@@ -622,6 +634,7 @@ class Game:
                     self.api_model = data.get("api_model", self.api_model)
                     self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
+                    self.saif_refusal_queue = data.get("saif_refusal_queue", [])
                     self.current_location = data.get("current_location", "overworld")
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
@@ -652,6 +665,7 @@ class Game:
         self.saif_recruited = False
         self.chat_history = []
         self.inventory = {"health_potion": 0}
+        self.saif_refusal_queue = []
         self.current_location = "overworld"
         
         # Load and preserve config keys from file if it exists
@@ -700,6 +714,7 @@ class Game:
             "api_model": self.api_model,
             "llm_think": self.llm_think,
             "inventory": self.inventory,
+            "saif_refusal_queue": self.saif_refusal_queue,
             "current_location": self.current_location
         }
         try:
@@ -738,6 +753,7 @@ class Game:
             "api_model": self.api_model,
             "llm_think": self.llm_think,
             "inventory": self.inventory,
+            "saif_refusal_queue": self.saif_refusal_queue,
             "player_x": self.player.x,
             "player_y": self.player.y,
             "camera_x": self.camera_x,
@@ -784,6 +800,7 @@ class Game:
                     self.api_model = data.get("api_model", self.api_model)
                     self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
+                    self.saif_refusal_queue = data.get("saif_refusal_queue", [])
                     self.player.x = data.get("player_x", 960)
                     self.player.y = data.get("player_y", 1040)
                     self.camera_x = data.get("camera_x", 0.0)
@@ -1254,9 +1271,17 @@ class Game:
                     self.combat_mode = 'menu'
                     self.menu_index = 0
                 elif self.combat_turn == 'saif':
-                    defiance_check = random.randint(1, 100)
-                    if defiance_check > self.saif_respect:
-                        self._trigger_saif_defiance("Attack")
+                    if self.saif_respect < 70:
+                        defiance_check = random.randint(1, 100)
+                        if defiance_check > (self.saif_respect + 20):
+                            self._trigger_saif_defiance("Attack")
+                        else:
+                            self.saif_attack_active = True
+                            self.saif_attack_start_time = pygame.time.get_ticks()
+                            self.saif_damage_dealt = False
+                            self.is_combo_attack = False
+                            self.combat_mode = 'menu'
+                            self.menu_index = 0
                     else:
                         self.saif_attack_active = True
                         self.saif_attack_start_time = pygame.time.get_ticks()
@@ -1291,10 +1316,11 @@ class Game:
             # Try to trigger Combo Strike
             if self.saif_recruited and self.saif_respect >= 70 and self.combo_cooldown == 0:
                 if self.combat_turn == 'saif':
-                    defiance_check = random.randint(1, 100)
-                    if defiance_check > self.saif_respect:
-                        self._trigger_saif_defiance("Special Combo")
-                        return
+                    if self.saif_respect < 70:
+                        defiance_check = random.randint(1, 100)
+                        if defiance_check > (self.saif_respect + 20):
+                            self._trigger_saif_defiance("Special Combo")
+                            return
                 
                 print("[Combat] Coordinated X-Strike combo initiated!")
                 self.combat_mode = 'menu'
@@ -1427,6 +1453,8 @@ class Game:
                     else:
                         self.menu_options = ['Attack', 'Item', 'Flee']
                     
+                    self._trigger_refusal_queue_refill()
+                    
                     # Reset animation and position variables
                     self.player_combat_current_pos = list(self.player_combat_pos)
                     self.saif_combat_current_pos = list(self.saif_combat_pos)
@@ -1439,6 +1467,9 @@ class Game:
                     self.enemy_damage_dealt = False
                     self.combo_cooldown = 0
                     self.saif_defending = False
+                    self.saif_excuse_active = False
+                    self.saif_excuse_text = ""
+                    self.saif_excuse_load_time = None
                     
                     # Clear VFX State
                     self.floating_texts = []
@@ -1467,7 +1498,7 @@ class Game:
                     self.combat_mode = 'menu'
                 else:
                     # Not recruited yet! Check if respect meets threshold
-                    if self.saif_respect >= 70:
+                    if self.saif_respect >= 40:
                         print("Saif joined the party!")
                         self.saif_recruited = True
                         self.saif_hp = self.saif_max_hp
@@ -1478,25 +1509,29 @@ class Game:
                             self.state = 'exploration_state'
                         self.combat_mode = 'menu'
                     else:
-                        # Keep chatting until respect meets 70
+                        # Keep chatting until respect meets 40
                         self.combat_mode = 'talk_input'
                         self.chat_input_text = ""
                 
         # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
+            # Handle excuse decay timer
+            if self.saif_excuse_active and self.saif_excuse_load_time is not None:
+                if pygame.time.get_ticks() - self.saif_excuse_load_time >= 4000:
+                    self.saif_excuse_active = False
+                    self.saif_excuse_text = ""
+                    self.saif_excuse_load_time = None
+
             if self.combat_mode == 'victory':
                 now = pygame.time.get_ticks()
                 if now - self.victory_start_time >= 4000:
                     self._end_battle_victory()
             # Handle response delay timer (4 seconds)
-            elif self.combat_turn in ('player', 'saif') and self.combat_mode == 'talk_response':
+            elif self.combat_turn == 'player' and self.combat_mode == 'talk_response':
                 now = pygame.time.get_ticks()
-                if self.talk_response_text != "...":
-                    if now - self.talk_response_start_time >= 4000:
-                        self.combat_mode = 'menu'
-                        self._end_current_turn()
-                else:
-                    self.talk_response_start_time = now
+                if now - self.talk_response_start_time >= 4000:
+                    self.combat_mode = 'menu'
+                    self._end_current_turn()
                     
             elif self.combat_turn == 'enemy' and self.enemy_attack_active:
                 now = pygame.time.get_ticks()
@@ -1920,7 +1955,7 @@ class Game:
                         self._draw_text(line, 170, 495 + idx * 25, (245, 245, 245))
                     
                     # Helper text (if recruited, show join notice, else show wait)
-                    if not self.saif_recruited and self.saif_respect >= 70:
+                    if not self.saif_recruited and self.saif_respect >= 40:
                         self._draw_text("Saif is joining the party...", 170, 550, (46, 139, 87))
                     else:
                         self._draw_text("Please wait...", 170, 550, (150, 150, 150))
@@ -2225,6 +2260,28 @@ class Game:
                 
                 self._draw_text(f"> {item_text}", 270, 460, color)
                 self._draw_text("ESC: Back | ENTER: Use", 270, 555, (150, 150, 150))
+            
+            elif self.saif_excuse_active:
+                # Render gold header (or crimson for defiance excuse)
+                self._draw_text("Saif (Refused):", 270, 425, (220, 20, 60))
+                
+                # Split and dynamically wrap dialogue to fit Center Box column bounds safely
+                words = self.saif_excuse_text.split(' ')
+                lines = []
+                current_line = ""
+                for word in words:
+                    test_line = current_line + " " + word if current_line else word
+                    if len(test_line) < 22:
+                        current_line = test_line
+                    else:
+                        lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    lines.append(current_line)
+                
+                # Draw dialogue lines
+                for idx, line in enumerate(lines[:4]):
+                    self._draw_text(line, 270, 460 + idx * 28, (245, 245, 245))
             
             # COLUMN 3: Party HP & Respect Stats (Right Box X: 540 to 800)
             # Stats Header

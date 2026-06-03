@@ -72,6 +72,7 @@ def reset_game_state():
         "api_model": api_model,
         "llm_think": llm_think,
         "inventory": {"health_potion": 0},
+        "saif_refusal_queue": [],
         "current_location": "overworld"
     }
     with open(state_file, "w") as f:

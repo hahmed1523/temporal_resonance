@@ -576,3 +576,100 @@ def generate_llm_response(player_text: str, game_state: dict) -> dict:
     # ── Fallback: heuristic mock ──────────────────────────────────────────
     print("[LLM System] All providers failed. Using heuristic fallback.")
     return _heuristic_response(player_text)
+
+
+def fetch_refusal_dialogue(game_state: dict) -> list:
+    """
+    Queries the configured LLM provider to fetch a JSON list of 3 combat excuses.
+    Returns a list of strings on success, or an offline fallback list on failure.
+    """
+    provider = game_state.get("llm_provider", "ollama")
+    ollama_model = game_state.get("ollama_model", "gemma4:e4b")
+    ollama_url = game_state.get("ollama_url", "http://localhost:11434")
+    api_base_url = game_state.get("api_base_url", "https://generativelanguage.googleapis.com/v1beta/openai")
+    api_model = game_state.get("api_model", "gemini-2.5-flash")
+    api_key = os.environ.get("API_KEY", "")
+    
+    system_prompt = (
+        "You are Saif, a weary, pragmatic, and tactical warrior. Speak conversationally and directly. "
+        "NEVER use poetic metaphors about the desert, sand, or the sun. Do not be overly dramatic. Use modern, grounded syntax. "
+        "Generate a JSON array of exactly 3 short, punchy, gritty combat excuses for refusing an order "
+        "(e.g., [\"Bad call. I am defending.\", \"Watch your own back.\"]). "
+        "Do NOT include thinking tags or other markdown formatting. Return ONLY the raw JSON array."
+    )
+    
+    raw_text = None
+    if provider == "ollama":
+        url = f"{ollama_url.rstrip('/')}/api/chat"
+        payload = {
+            "model": ollama_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Generate the JSON array of 3 excuses."}
+            ],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.7}
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=15) as response:
+                res_body = response.read().decode("utf-8")
+                res_json = json.loads(res_body)
+                raw_text = res_json.get("message", {}).get("content", "")
+        except Exception as e:
+            print(f"[LLM Buffer] Ollama fetch failed: {e}")
+    elif provider == "api":
+        if not api_key:
+            print("[LLM Buffer] API key not configured.")
+        else:
+            url = f"{api_base_url.rstrip('/')}/v1/chat/completions"
+            payload = {
+                "model": api_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Generate the JSON array of 3 excuses."}
+                ],
+                "temperature": 0.7,
+                "response_format": {"type": "json_object"}
+            }
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}"
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    res_body = response.read().decode("utf-8")
+                    res_json = json.loads(res_body)
+                    raw_text = res_json["choices"][0]["message"]["content"]
+            except Exception as e:
+                print(f"[LLM Buffer] API fetch failed: {e}")
+                
+    if raw_text:
+        try:
+            cleaned = _strip_think_blocks(raw_text)
+            cleaned = _strip_markdown_fences(cleaned)
+            match = re.search(r"(\[.*\])", cleaned, re.DOTALL)
+            if match:
+                array_str = match.group(1)
+                parsed = json.loads(array_str)
+                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                    return parsed
+        except Exception as e:
+            print(f"[LLM Buffer] JSON parsing of excuses failed: {e}. Raw content: {raw_text}")
+            
+    return [
+        "Covering my flank makes more sense right now.",
+        "I need to stay on my feet. Potion was necessary.",
+        "Not throwing my life away on a reckless order."
+    ]
