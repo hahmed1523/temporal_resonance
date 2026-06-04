@@ -146,7 +146,12 @@ class SoundManager:
             
         path = self.bgm_tracks.get(location)
         if not path:
-            print(f"[SoundManager] No background music mapped for location: '{location}'")
+            print(f"[SoundManager] No background music mapped for location: '{location}'. Stopping BGM.")
+            try:
+                pygame.mixer.music.stop()
+            except Exception as e:
+                print(f"[SoundManager] Error stopping music: {e}")
+            self.current_bgm = None
             return
             
         if self.current_bgm == location:

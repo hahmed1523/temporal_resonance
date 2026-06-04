@@ -77,7 +77,6 @@ class Game:
         # JSON State Configuration
         self.state_file_path = os.path.join("data", "game_state.json")
         self.save_slot_file = "save_slot_1.json"
-        self._load_game_state()
         
         # Initialize QuestManager
         self.quest_manager = QuestManager(self.data_manager, self)
@@ -134,6 +133,9 @@ class Game:
         self.camera_x = 0.0
         self.camera_y = 0.0
         
+        # Load Game State (which sets up self.enemy based on loaded flag settings)
+        self._load_game_state()
+        
         # Initialize Game Entities from maps.json / enemies.json
         overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
         
@@ -144,26 +146,6 @@ class Game:
             player_y = overworld_data["player_spawn"][1] * self.tile_size
             
         self.player = Player(player_x, player_y)
-        
-        enemy_x = 1120
-        enemy_y = 1040
-        enemy_color = (220, 20, 60)
-        enemy_size = 40
-        self.enemy_type = "desert_bandit"
-        
-        if overworld_data and overworld_data.get("enemy_spawns"):
-            first_enemy = overworld_data["enemy_spawns"][0]
-            self.enemy_type = first_enemy["type"]
-            enemy_grid_pos = first_enemy["pos"]
-            enemy_x = enemy_grid_pos[0] * self.tile_size
-            enemy_y = enemy_grid_pos[1] * self.tile_size
-            
-            if self.data_manager:
-                enemy_info = self.data_manager.get_enemy_data(self.enemy_type)
-                enemy_color = tuple(enemy_info.get("color", [220, 20, 60]))
-                enemy_size = enemy_info.get("size", 40)
-                
-        self.enemy = Enemy(enemy_x, enemy_y, size=enemy_size, color=enemy_color)
         
         # Golden Chest — position derived from grid scan below
         self.chest = None
@@ -202,6 +184,10 @@ class Game:
         self.saif_combat_pos = (150, 230)
         self.enemy_combat_start_pos = (580, 190)
         self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
+        self.is_sliding = False
+        self.combat_ui_offset = 0.0
+        self.is_combat_ending = False
+        self.enemy_defeated_and_removed = False
         
         # Saif HP parameter & Enemy targeting variables
         self.saif_hp = 100
@@ -267,6 +253,31 @@ class Game:
         self.saif_excuse_load_time = None
         self.saif_refusal_queue = []
 
+    def _setup_enemy(self):
+        """
+        Sets up the overworld enemy based on map configurations.
+        """
+        overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
+        enemy_x = 1120
+        enemy_y = 1040
+        enemy_color = (220, 20, 60)
+        enemy_size = 40
+        self.enemy_type = "desert_bandit"
+        
+        if overworld_data and overworld_data.get("enemy_spawns"):
+            first_enemy = overworld_data["enemy_spawns"][0]
+            self.enemy_type = first_enemy["type"]
+            enemy_grid_pos = first_enemy["pos"]
+            enemy_x = enemy_grid_pos[0] * self.tile_size
+            enemy_y = enemy_grid_pos[1] * self.tile_size
+            
+            if self.data_manager:
+                enemy_info = self.data_manager.get_enemy_data(self.enemy_type)
+                enemy_color = tuple(enemy_info.get("color", [220, 20, 60]))
+                enemy_size = enemy_info.get("size", 40)
+                
+        self.enemy = Enemy(enemy_x, enemy_y, size=enemy_size, color=enemy_color)
+
     def _adjust_respect(self, change: int):
         """
         Adjusts Saif's respect meter, keeping it within [0, 100].
@@ -320,6 +331,8 @@ class Game:
         self.player_recoil_frames = 0
         self.saif_recoil_frames = 0
         
+        self.is_combat_ending = False
+        self.enemy_defeated_and_removed = False
         self._save_game_state()
 
     def _start_enemy_turn(self):
@@ -411,6 +424,8 @@ class Game:
         """
         Launches a background daemon thread to query LLM for combat excuses and refill the buffer.
         """
+        if not self.saif_recruited:
+            return
         print("[LLM Buffer] Refilling refusal queue in background...")
         game_state = {
             "player_hp": self.player_hp,
@@ -482,11 +497,12 @@ class Game:
         self.screen_shake_frames = 15
         
         # Instant Execution
-        if self.saif_refusal_queue:
+        if len(self.saif_refusal_queue) > 0:
             excuse = self.saif_refusal_queue.pop(0)
             self._save_game_state()
         else:
             excuse = 'Not happening.'
+            print("Not happening.")
             
         self.saif_excuse_active = True
         self.saif_excuse_text = excuse
@@ -513,6 +529,13 @@ class Game:
         """
         Awards EXP, processes level up, sets up victory screen state, and triggers feedback.
         """
+        self.is_combat_ending = True
+        self.combat_ending_type = 'victory'
+        self.combat_ending_start_time = pygame.time.get_ticks()
+        self.sound_manager.play_bgm(None) # Stop BGM music
+        self.combat_ui_offset = 200.0 # Hide UI
+        self.enemy_defeated_and_removed = True
+        
         self.combat_mode = 'victory'
         self.victory_start_time = pygame.time.get_ticks()
         
@@ -638,6 +661,30 @@ class Game:
         self.talk_response_start_time = pygame.time.get_ticks()
         self.combat_mode = 'talk_response'
 
+    def _finish_dialogue_response(self, force_exit=False):
+        """Instantly finishes the dialogue response display, applying recruitment and returning control."""
+        if self.saif_recruited or self.saif_respect >= 40:
+            if not self.saif_recruited:
+                print("Saif joined the party!")
+                self.saif_recruited = True
+                self.saif_hp = self.saif_max_hp
+                self._save_game_state()
+            if self.active_camp_npc == 'saif':
+                self.state = 'camp_state'
+            else:
+                self.state = 'exploration_state'
+            self.combat_mode = 'menu'
+        else:
+            if force_exit:
+                if self.active_camp_npc == 'saif':
+                    self.state = 'camp_state'
+                else:
+                    self.state = 'exploration_state'
+                self.combat_mode = 'menu'
+            else:
+                self.combat_mode = 'talk_input'
+                self.chat_input_text = ""
+
     def _load_game_state(self):
         """
         Loads player and enemy HP, respect, inventory, and LLM configuration parameters from the data/game_state.json file.
@@ -707,6 +754,14 @@ class Game:
                         self.global_flags["started_desert_quest"] = True
                     if "desert_boss_defeated" not in self.global_flags:
                         self.global_flags["desert_boss_defeated"] = False
+                    
+                    # Load enemy state based on boss defeated flag
+                    if self.global_flags.get("desert_boss_defeated"):
+                        self.enemy = None
+                        self.enemy_defeated_and_removed = True
+                    else:
+                        self.enemy_defeated_and_removed = False
+                        self._setup_enemy()
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -739,6 +794,8 @@ class Game:
         self.saif_refusal_queue = []
         self.current_location = "overworld"
         self.global_flags = {"started_desert_quest": True, "desert_boss_defeated": False}
+        self.enemy_defeated_and_removed = False
+        self._setup_enemy()
         
         # Load and preserve config keys from file if it exists
         if os.path.exists(self.state_file_path):
@@ -910,6 +967,8 @@ class Game:
         and allowing sliding along obstacles.
         """
         # Calculate direction vector from enemy to player
+        if not self.enemy or self.enemy_defeated_and_removed:
+            return
         dx = self.player.x - self.enemy.x
         dy = self.player.y - self.enemy.y
         
@@ -1039,7 +1098,8 @@ class Game:
                 elif self.state == 'dialogue_state':
                     self._handle_dialogue_events(event)
                 elif self.state == 'combat_state':
-                    self._handle_combat_events(event)
+                    if not self.is_sliding and not self.is_combat_ending:
+                        self._handle_combat_events(event)
 
     # ── State-specific event handlers ────────────────────────────────────
 
@@ -1323,6 +1383,13 @@ class Game:
 
     def _handle_dialogue_events(self, event):
         """Handles KEYDOWN events during peaceful dialogue with Saif."""
+        if self.combat_mode == 'talk_response':
+            if event.key == pygame.K_ESCAPE:
+                self._finish_dialogue_response(force_exit=True)
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                self._finish_dialogue_response(force_exit=False)
+            return
+
         if event.key == pygame.K_ESCAPE:
             if self.active_camp_npc == 'saif':
                 self.state = 'camp_state'
@@ -1435,10 +1502,16 @@ class Game:
                 self.combat_mode = 'item'
 
             elif selected_option == 'Flee':
-                print("Fled from battle!")
-                self._knockback_player()
-                self.current_location = "overworld"
-                self.state = 'exploration_state'
+                print("Fled from battle! Starting fleeing transition...")
+                self.is_combat_ending = True
+                self.combat_ending_type = 'flee'
+                self.combat_ending_start_time = pygame.time.get_ticks()
+                self.sound_manager.play_bgm(None) # Stop battle music
+                self.combat_ui_offset = 200.0 # Hide UI
+                
+                # Define flee targets (slide to the left, off-screen)
+                self.player_flee_target = (self.player_combat_current_pos[0] - 300, self.player_combat_current_pos[1])
+                self.saif_flee_target = (self.saif_combat_current_pos[0] - 300, self.saif_combat_current_pos[1])
 
     def _handle_combat_special(self, event):
         """Handles navigation and selection inside the Special sub-menu."""
@@ -1575,84 +1648,74 @@ class Game:
             
             # Check collision with overworld enemy only in exploration state
             if self.state == 'exploration_state':
-                if self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
-                    self.state = 'combat_transition_state'
-                    self.transition_elapsed = 0.0
+                if self.enemy and not self.enemy_defeated_and_removed and self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
+                    self.state = 'combat_state'
+                    self.current_location = 'combat'
+                    self.combat_mode = 'menu'
+                    self.combat_turn = 'player'
+                    self.menu_index = 0
+                    if self.saif_recruited:
+                        self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
+                    else:
+                        self.menu_options = ['Attack', 'Item', 'Flee']
                     
-                    # Pre-calculate spiral coordinates for transition effect (cols: 20, rows: 15)
-                    cols, rows = 20, 15
-                    self.spiral_coords = []
-                    left, right = 0, cols - 1
-                    top, bottom = 0, rows - 1
-                    while left <= right and top <= bottom:
-                        # Top row
-                        for col in range(left, right + 1):
-                            self.spiral_coords.append((col, top))
-                        top += 1
-                        # Right column
-                        for row in range(top, bottom + 1):
-                            self.spiral_coords.append((right, row))
-                        right -= 1
-                        # Bottom row
-                        if top <= bottom:
-                            for col in range(right, left - 1, -1):
-                                self.spiral_coords.append((col, bottom))
-                            bottom -= 1
-                        # Left column
-                        if left <= right:
-                            for row in range(bottom, top - 1, -1):
-                                self.spiral_coords.append((left, row))
-                            left += 1
-                    self.transition_spiral_total = len(self.spiral_coords)
+                    # Set starting coordinates at their overworld positions
+                    start_player_x = self.player.x - self.camera_x
+                    start_player_y = self.player.y - self.camera_y
+                    start_enemy_x = self.enemy.x - self.camera_x
+                    start_enemy_y = self.enemy.y - self.camera_y
+                    
+                    self.player_original_screen_pos = (start_player_x, start_player_y)
+                    self.clash_start_player_pos = (start_player_x, start_player_y)
+                    self.clash_start_enemy_pos = (start_enemy_x, start_enemy_y)
+                    self.clash_start_saif_pos = (start_player_x, start_player_y + 80)
+                    
+                    # Target 'Battle Formation' coordinates (ease-out targets)
+                    self.player_combat_pos = (int(0.25 * self.width), 150)
+                    self.enemy_combat_start_pos = (int(0.75 * self.width), 190)
+                    self.saif_combat_pos = (int(0.25 * self.width), 230)
+                    
+                    # Initialize starting positions
+                    self.player_combat_current_pos = [start_player_x, start_player_y]
+                    self.enemy_combat_current_pos = [start_enemy_x, start_enemy_y]
+                    self.saif_combat_current_pos = [start_player_x, start_player_y + 80]
+                    
+                    self.is_sliding = True
+                    self.combat_ui_offset = 200.0
+                    self.combat_clash_active = True
+                    self.combat_clash_start_time = pygame.time.get_ticks()
+                    self.combat_clash_hit_triggered = False
+                    self.player_attack_active = False
+                    self.saif_attack_active = False
+                    self.player_damage_dealt = False
+                    self.saif_damage_dealt = False
+                    self.is_combo_attack = False
+                    self.combo_damage_applied = False
+                    self.enemy_damage_dealt = False
+                    self.combo_cooldown = 0
+                    self.saif_defending = False
+                    self.saif_excuse_active = False
+                    self.saif_excuse_text = ""
+                    self.saif_excuse_load_time = None
+                    
+                    # Clear VFX State
+                    self.floating_texts = []
+                    self.screen_shake_frames = 0
+                    self.enemy_flash_frames = 0
+                    self.player_flash_frames = 0
+                    self.saif_flash_frames = 0
+                    self.player_recoil_frames = 0
+                    self.saif_recoil_frames = 0
                     
                     # Trigger background refill thread immediately!
                     self._trigger_refusal_queue_refill()
-                    print("Combat Collision! Starting Battle Transition...")
+                    
+                    # Start playing the battle music!
+                    self._update_bgm()
+                    print("Combat Collision! Instantly transitioned to Battle State...")
                 
             # Keep camera centered on player
             self._update_camera()
-
-        elif self.state == 'combat_transition_state':
-            self.transition_elapsed += dt
-            # Transition loops until refusal queue has at least 1 excuse or 3.0s failsafe timeout passes
-            if len(self.saif_refusal_queue) > 0 or self.transition_elapsed >= 3.0:
-                # Transition to combat_state
-                self.state = 'combat_state'
-                self.current_location = 'combat'
-                self.combat_mode = 'menu'
-                self.combat_turn = 'player'
-                self.menu_index = 0
-                if self.saif_recruited:
-                    self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
-                else:
-                    self.menu_options = ['Attack', 'Item', 'Flee']
-                
-                # Reset animation and position variables
-                self.player_combat_current_pos = list(self.player_combat_pos)
-                self.saif_combat_current_pos = list(self.saif_combat_pos)
-                self.player_attack_active = False
-                self.saif_attack_active = False
-                self.player_damage_dealt = False
-                self.saif_damage_dealt = False
-                self.is_combo_attack = False
-                self.combo_damage_applied = False
-                self.enemy_damage_dealt = False
-                self.combo_cooldown = 0
-                self.saif_defending = False
-                self.saif_excuse_active = False
-                self.saif_excuse_text = ""
-                self.saif_excuse_load_time = None
-                
-                # Clear VFX State
-                self.floating_texts = []
-                self.screen_shake_frames = 0
-                self.enemy_flash_frames = 0
-                self.player_flash_frames = 0
-                self.saif_flash_frames = 0
-                self.player_recoil_frames = 0
-                self.saif_recoil_frames = 0
-                
-                print("Battle Started!")
 
         elif self.state == 'game_load_state':
             # Smooth load progress update
@@ -1672,43 +1735,149 @@ class Game:
         elif self.state == 'dialogue_state' and self.combat_mode == 'talk_response':
             now = pygame.time.get_ticks()
             if now - self.talk_response_start_time >= 4000:
-                if self.saif_recruited:
-                    # Already recruited! Just return to camp/exploration map
-                    if self.active_camp_npc == 'saif':
-                        self.state = 'camp_state'
-                    else:
-                        self.state = 'exploration_state'
-                    self.combat_mode = 'menu'
-                else:
-                    # Not recruited yet! Check if respect meets threshold
-                    if self.saif_respect >= 40:
-                        print("Saif joined the party!")
-                        self.saif_recruited = True
-                        self.saif_hp = self.saif_max_hp
-                        self._save_game_state()
-                        if self.active_camp_npc == 'saif':
-                            self.state = 'camp_state'
-                        else:
-                            self.state = 'exploration_state'
-                        self.combat_mode = 'menu'
-                    else:
-                        # Keep chatting until respect meets 40
-                        self.combat_mode = 'talk_input'
-                        self.chat_input_text = ""
+                self._finish_dialogue_response(force_exit=False)
                 
-        # Handle enemy turn sliding animation and timers in combat state
         elif self.state == 'combat_state':
+            if self.is_combat_ending:
+                # For victory, wait 1.0 second for text display before reverse Lerp
+                if self.combat_ending_type == 'victory':
+                    now = pygame.time.get_ticks()
+                    if now - self.victory_start_time < 1000:
+                        return
+                
+                # Determine target positions
+                if self.combat_ending_type == 'victory':
+                    target_player = self.player_original_screen_pos
+                    target_saif = (self.player_original_screen_pos[0], self.player_original_screen_pos[1] + 80)
+                else:  # Flee
+                    target_player = self.player_flee_target
+                    target_saif = self.saif_flee_target
+                
+                # Reverse Lerp (Ease-Out)
+                self.player_combat_current_pos[0] += (target_player[0] - self.player_combat_current_pos[0]) * 0.15
+                self.player_combat_current_pos[1] += (target_player[1] - self.player_combat_current_pos[1]) * 0.15
+                
+                if self.saif_recruited:
+                    self.saif_combat_current_pos[0] += (target_saif[0] - self.saif_combat_current_pos[0]) * 0.15
+                    self.saif_combat_current_pos[1] += (target_saif[1] - self.saif_combat_current_pos[1]) * 0.15
+                
+                # Check distance
+                p_dist = math.hypot(target_player[0] - self.player_combat_current_pos[0], target_player[1] - self.player_combat_current_pos[1])
+                
+                if p_dist < 2.0:
+                    self.player_combat_current_pos = list(target_player)
+                    if self.saif_recruited:
+                        self.saif_combat_current_pos = list(target_saif)
+                    
+                    self.is_combat_ending = False
+                    self.state = 'exploration_state'
+                    self.current_location = 'overworld'
+                    
+                    # Snap player to overworld grid
+                    self.player.x = round(self.player.x / self.tile_size) * self.tile_size
+                    self.player.y = round(self.player.y / self.tile_size) * self.tile_size
+                    
+                    if self.combat_ending_type == 'victory':
+                        self.enemy = None  # Remove from entity list
+                        self._reset_combat_only_state()
+                    else:  # Flee
+                        self._knockback_player()
+                        # Snap again after knockback
+                        self.player.x = round(self.player.x / self.tile_size) * self.tile_size
+                        self.player.y = round(self.player.y / self.tile_size) * self.tile_size
+                        self._reset_combat_only_state()
+                    
+                    self._update_camera()
+                return # Skip other updates while ending combat
+
+            if self.is_sliding:
+                if self.combat_clash_active:
+                    now = pygame.time.get_ticks()
+                    elapsed = now - self.combat_clash_start_time
+                    clash_lunge_duration = 250
+                    
+                    # Midpoint coordinates
+                    mid_x = (self.clash_start_player_pos[0] + self.clash_start_enemy_pos[0]) / 2
+                    mid_y = (self.clash_start_player_pos[1] + self.clash_start_enemy_pos[1]) / 2
+                    
+                    if elapsed < clash_lunge_duration:
+                        t = elapsed / clash_lunge_duration
+                        # Fast lunge towards midpoint
+                        self.player_combat_current_pos[0] = self.clash_start_player_pos[0] + (mid_x - self.clash_start_player_pos[0]) * t
+                        self.player_combat_current_pos[1] = self.clash_start_player_pos[1] + (mid_y - self.clash_start_player_pos[1]) * t
+                        
+                        self.enemy_combat_current_pos[0] = self.clash_start_enemy_pos[0] + (mid_x - self.clash_start_enemy_pos[0]) * t
+                        self.enemy_combat_current_pos[1] = self.clash_start_enemy_pos[1] + (mid_y - self.clash_start_enemy_pos[1]) * t
+                        
+                        self.saif_combat_current_pos[0] = self.clash_start_saif_pos[0] + (mid_x - self.clash_start_saif_pos[0]) * t
+                        self.saif_combat_current_pos[1] = self.clash_start_saif_pos[1] + (mid_y - self.clash_start_saif_pos[1]) * t
+                    else:
+                        # Impact peak!
+                        if not self.combat_clash_hit_triggered:
+                            self.combat_clash_hit_triggered = True
+                            self.sound_manager.play_sfx("hit")
+                            self.screen_shake_frames = 20
+                            self.player_flash_frames = 8
+                            self.enemy_flash_frames = 8
+                            self.floating_texts.append({
+                                "text": "CLASH!",
+                                "x": int(mid_x),
+                                "y": int(mid_y - 20),
+                                "timer": 60,
+                                "color": (238, 206, 112)
+                            })
+                        
+                        # Freeze in place briefly
+                        self.player_combat_current_pos[0] = mid_x
+                        self.player_combat_current_pos[1] = mid_y
+                        self.enemy_combat_current_pos[0] = mid_x
+                        self.enemy_combat_current_pos[1] = mid_y
+                        self.saif_combat_current_pos[0] = mid_x
+                        self.saif_combat_current_pos[1] = mid_y
+                        
+                        if elapsed >= 400: # 150ms impact freeze
+                            self.combat_clash_active = False
+                    return # Skip normal updates during clash lunge
+                
+                # Ease-Out Math (Lerp) - Recoil push back to battle formation
+                self.player_combat_current_pos[0] += (self.player_combat_pos[0] - self.player_combat_current_pos[0]) * 0.15
+                self.player_combat_current_pos[1] += (self.player_combat_pos[1] - self.player_combat_current_pos[1]) * 0.15
+                
+                self.enemy_combat_current_pos[0] += (self.enemy_combat_start_pos[0] - self.enemy_combat_current_pos[0]) * 0.15
+                self.enemy_combat_current_pos[1] += (self.enemy_combat_start_pos[1] - self.enemy_combat_current_pos[1]) * 0.15
+                
+                self.saif_combat_current_pos[0] += (self.saif_combat_pos[0] - self.saif_combat_current_pos[0]) * 0.15
+                self.saif_combat_current_pos[1] += (self.saif_combat_pos[1] - self.saif_combat_current_pos[1]) * 0.15
+                
+                # Check distance to target positions (hypot)
+                p_dist = math.hypot(self.player_combat_pos[0] - self.player_combat_current_pos[0], self.player_combat_pos[1] - self.player_combat_current_pos[1])
+                e_dist = math.hypot(self.enemy_combat_start_pos[0] - self.enemy_combat_current_pos[0], self.enemy_combat_start_pos[1] - self.enemy_combat_current_pos[1])
+                s_dist = math.hypot(self.saif_combat_pos[0] - self.saif_combat_current_pos[0], self.saif_combat_pos[1] - self.saif_combat_current_pos[1])
+                
+                # Snap & Lock
+                if p_dist < 2.0 and e_dist < 2.0 and s_dist < 2.0:
+                    self.player_combat_current_pos = list(self.player_combat_pos)
+                    self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
+                    self.saif_combat_current_pos = list(self.saif_combat_pos)
+                    self.is_sliding = False
+                    
+                    # UI & Audio Trigger
+                    self.sound_manager.play_sfx("menu_select")
+                return # Skip other updates while sliding
+                
+            # Slide combat menus up
+            if self.combat_ui_offset > 0.0:
+                self.combat_ui_offset += (0.0 - self.combat_ui_offset) * 0.15
+                if self.combat_ui_offset < 2.0:
+                    self.combat_ui_offset = 0.0
+ 
             # Handle excuse decay timer
             if self.saif_excuse_active and self.saif_excuse_load_time is not None:
                 if pygame.time.get_ticks() - self.saif_excuse_load_time >= 4000:
                     self.saif_excuse_active = False
                     self.saif_excuse_text = ""
                     self.saif_excuse_load_time = None
-
-            if self.combat_mode == 'victory':
-                now = pygame.time.get_ticks()
-                if now - self.victory_start_time >= 4000:
-                    self._end_battle_victory()
+ 
             # Handle response delay timer (4 seconds)
             elif self.combat_turn == 'player' and self.combat_mode == 'talk_response':
                 now = pygame.time.get_ticks()
@@ -1721,10 +1890,10 @@ class Game:
                 elapsed = now - self.enemy_attack_start_time
                 
                 # Attacking slide animation (forward then backward) using randomized durations
-                # Slide from right (580) to left (190) toward the player/Saif
                 start_x = self.enemy_combat_start_pos[0]
-                target_x = 190
-                target_y = self.player_combat_pos[1] if self.enemy_target == 'player' else self.saif_combat_pos[1]
+                target_combat_pos = self.player_combat_pos if self.enemy_target == 'player' else self.saif_combat_pos
+                target_x = target_combat_pos[0] + 40 if start_x >= target_combat_pos[0] else target_combat_pos[0] - 40
+                target_y = target_combat_pos[1]
                 
                 # Keep Y-axis aligned with the target
                 self.enemy_combat_current_pos[1] = target_y
@@ -1823,7 +1992,7 @@ class Game:
                 duration = 600
                 half_duration = 300
                 start_x = self.player_combat_pos[0]
-                target_x = 540
+                target_x = self.enemy_combat_start_pos[0] - 40 if start_x <= self.enemy_combat_start_pos[0] else self.enemy_combat_start_pos[0] + 40
                 
                 # Keep Y aligned
                 self.player_combat_current_pos[1] = self.player_combat_pos[1]
@@ -1871,7 +2040,7 @@ class Game:
                 duration = 600
                 half_duration = 300
                 start_x = self.saif_combat_pos[0]
-                target_x = 540
+                target_x = self.enemy_combat_start_pos[0] - 40 if start_x <= self.enemy_combat_start_pos[0] else self.enemy_combat_start_pos[0] + 40
                 
                 # Keep Y aligned
                 self.saif_combat_current_pos[1] = self.saif_combat_pos[1]
@@ -1956,7 +2125,7 @@ class Game:
             # Version/Info
             self._draw_text("Use UP/DOWN to navigate | ENTER to select", self.width // 2, 550, (100, 100, 110), center=True)
             
-        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state', 'combat_transition_state'):
+        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state', 'combat_state'):
             # Render solid grey walls from map grid first with frustum culling
             if self.map_grid:
                 tile_size = self.tile_size
@@ -1998,13 +2167,15 @@ class Game:
             
             # Render game entities with camera offsets (only in overworld!)
             if self.map_grid != self.camp_map_grid:
-                self.enemy.draw(self.screen, self.camera_x, self.camera_y)
+                if self.state != 'combat_state' and self.enemy and not self.enemy_defeated_and_removed:
+                    self.enemy.draw(self.screen, self.camera_x, self.camera_y)
                 if self.chest_x is not None:
                     c_idx = int(self.chest_x // self.tile_size)
                     r_idx = int(self.chest_y // self.tile_size)
                     if self.map_grid[r_idx][c_idx] == 2:
                         self.chest.draw(self.screen, self.camera_x, self.camera_y)
-            self.player.draw(self.screen, self.camera_x, self.camera_y)
+            if self.state != 'combat_state':
+                self.player.draw(self.screen, self.camera_x, self.camera_y)
             
             # Render Camp entities if in camp map grid
             if self.map_grid == self.camp_map_grid:
@@ -2176,26 +2347,7 @@ class Game:
                 if pygame.time.get_ticks() - self.save_confirmed_time < 2000:
                     self._draw_text("Game Saved Successfully!", self.width // 2, 395, (46, 139, 87), center=True)
 
-            # Draw the retro combat transition spiral overlay on top of the overworld render
-            if self.state == 'combat_transition_state':
-                # Loop the spiral transition wipe animation every 1.5 seconds
-                t_loop = self.transition_elapsed % 1.5
-                k = int((t_loop / 1.5) * self.transition_spiral_total)
-                k = max(0, min(self.transition_spiral_total, k))
-                
-                for idx in range(k):
-                    col, row = self.spiral_coords[idx]
-                    cell_rect = pygame.Rect(col * 40, row * 40, 40, 40)
-                    
-                    # Burning leading edge (last 6 blocks in the drawn queue)
-                    if idx >= k - 6:
-                        # Draw glowing gold block with a crimson outline
-                        pygame.draw.rect(self.screen, (238, 206, 112), cell_rect)
-                        pygame.draw.rect(self.screen, (220, 20, 60), cell_rect, 2)
-                    else:
-                        # Draw solid dark block with a subtle border
-                        pygame.draw.rect(self.screen, (15, 15, 18), cell_rect)
-                        pygame.draw.rect(self.screen, (28, 28, 34), cell_rect, 1)
+
             
         elif self.state == 'settings_state':
             # ── LLM Settings Screen ──────────────────────────────────────
@@ -2360,7 +2512,12 @@ class Game:
             # Subtitle message
             self._draw_text("Please wait while cognitive matrices load.", self.width // 2, 410, (100, 100, 110), center=True)
             
-        elif self.state == 'combat_state':
+        if self.state == 'combat_state':
+            # Draw semi-transparent black overlay (Arena Dim) to dim the overworld
+            overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 150))
+            self.screen.blit(overlay, (0, 0))
+
             # 1. Draw Player (blue) and Enemy (red) and Saif (green, if recruited) in their combat layouts
             # Player (Dodger Blue) animated on the left (with recoil offset if hit)
             player_x_offset = -8 if self.player_recoil_frames > 0 else 0
@@ -2387,215 +2544,233 @@ class Game:
                 else:
                     pygame.draw.rect(self.screen, (46, 139, 87), saif_rect)
             
-            # Enemy (Crimson Red or White Flash) animated/static on the right
-            enemy_rect = pygame.Rect(int(self.enemy_combat_current_pos[0]), int(self.enemy_combat_current_pos[1]), self.enemy.size, self.enemy.size)
-            if self.enemy_flash_frames > 0:
-                pygame.draw.rect(self.screen, (255, 255, 255), enemy_rect)
-                self.enemy_flash_frames -= 1
-            else:
-                pygame.draw.rect(self.screen, self.enemy.color, enemy_rect)
-            
-            # Draw floating Enemy HP above the square in upper arena
-            enemy_x = int(self.enemy_combat_current_pos[0])
-            enemy_y = int(self.enemy_combat_current_pos[1])
-            self._draw_text(f"HP: {self.enemy_hp}/100", enemy_x - 10, enemy_y - 40, self.enemy.color)
-            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(enemy_x - 10, enemy_y - 15, 60, 6))
-            pygame.draw.rect(self.screen, self.enemy.color, pygame.Rect(enemy_x - 10, enemy_y - 15, int(60 * (self.enemy_hp / 100.0)), 6))
+            # Enemy (Crimson Red or White Flash) animated/static on the right (hidden when defeated/removed)
+            if self.enemy and not self.enemy_defeated_and_removed:
+                enemy_rect = pygame.Rect(int(self.enemy_combat_current_pos[0]), int(self.enemy_combat_current_pos[1]), self.enemy.size, self.enemy.size)
+                if self.enemy_flash_frames > 0:
+                    pygame.draw.rect(self.screen, (255, 255, 255), enemy_rect)
+                    self.enemy_flash_frames -= 1
+                else:
+                    pygame.draw.rect(self.screen, self.enemy.color, enemy_rect)
+                
+                # Draw floating Enemy HP above the square in upper arena
+                enemy_x = int(self.enemy_combat_current_pos[0])
+                enemy_y = int(self.enemy_combat_current_pos[1])
+                self._draw_text(f"HP: {self.enemy_hp}/100", enemy_x - 10, enemy_y - 40, self.enemy.color)
+                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(enemy_x - 10, enemy_y - 15, 60, 6))
+                pygame.draw.rect(self.screen, self.enemy.color, pygame.Rect(enemy_x - 10, enemy_y - 15, int(60 * (self.enemy_hp / 100.0)), 6))
             
             # 2. Draw Bottom Combat Action Menu (Bottom 1/3: Y: 400 to 600)
-            # Fill bottom 200px area with lighter charcoal panel
-            pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(0, 400, self.width, 200))
-            pygame.draw.line(self.screen, self.grid_color, (0, 400), (self.width, 400), 2)
-            
-            # Draw vertical box dividers unconditionally
-            pygame.draw.line(self.screen, self.grid_color, (250, 400), (250, 600), 2)
-            pygame.draw.line(self.screen, self.grid_color, (540, 400), (540, 600), 2)
-            
-            # COLUMN 1: Action Menu Options (Left Box X: 0 to 250)
-            if self.combat_mode == 'item_target':
-                self._draw_text("Heal who?", 30, 425, (238, 206, 112))
-                self._draw_text("1: Player", 50, 465, (30, 144, 255))
-                self._draw_text("2: Saif", 50, 505, (46, 139, 87))
-                self._draw_text("ESC: Cancel", 30, 550, (150, 150, 150))
-            else:
-                for i, option in enumerate(self.menu_options):
-                    y_pos = 425 + i * 35
-                    if self.combat_mode == 'menu':
-                        if i == self.menu_index:
-                            self._draw_text(f"> {option}", 30, y_pos, (30, 144, 255))
+            if not self.is_sliding and not self.is_combat_ending:
+                offset_y = int(self.combat_ui_offset)
+                
+                # Local offset drawing helpers
+                def draw_rect_offset(color, rect, width=0):
+                    offset_rect = pygame.Rect(rect.x, rect.y + offset_y, rect.width, rect.height)
+                    pygame.draw.rect(self.screen, color, offset_rect, width)
+
+                def draw_line_offset(color, start_pos, end_pos, width=1):
+                    offset_start = (start_pos[0], start_pos[1] + offset_y)
+                    offset_end = (end_pos[0], end_pos[1] + offset_y)
+                    pygame.draw.line(self.screen, color, offset_start, offset_end, width)
+
+                def draw_text_offset(text, x, y, color=(255, 255, 255), center=False):
+                    self._draw_text(text, x, y + offset_y, color, center)
+
+                # Fill bottom 200px area with lighter charcoal panel
+                draw_rect_offset(self.panel_color, pygame.Rect(0, 400, self.width, 200))
+                draw_line_offset(self.grid_color, (0, 400), (self.width, 400), 2)
+                
+                # Draw vertical box dividers unconditionally
+                draw_line_offset(self.grid_color, (250, 400), (250, 600), 2)
+                draw_line_offset(self.grid_color, (540, 400), (540, 600), 2)
+                
+                # COLUMN 1: Action Menu Options (Left Box X: 0 to 250)
+                if self.combat_mode == 'item_target':
+                    draw_text_offset("Heal who?", 30, 425, (238, 206, 112))
+                    draw_text_offset("1: Player", 50, 465, (30, 144, 255))
+                    draw_text_offset("2: Saif", 50, 505, (46, 139, 87))
+                    draw_text_offset("ESC: Cancel", 30, 550, (150, 150, 150))
+                else:
+                    for i, option in enumerate(self.menu_options):
+                        y_pos = 425 + i * 35
+                        if self.combat_mode == 'menu':
+                            if i == self.menu_index:
+                                draw_text_offset(f"> {option}", 30, y_pos, (30, 144, 255))
+                            else:
+                                draw_text_offset(option, 50, y_pos, (150, 150, 150))
                         else:
-                            self._draw_text(option, 50, y_pos, (150, 150, 150))
-                    else:
-                        # Grayed out because sub-menu is active
-                        self._draw_text(option, 50, y_pos, (70, 70, 75))
-            
-            # COLUMN 2: Chat Log / Dialogue Box / Submenus (Center Box X: 250 to 540)
-            if self.combat_mode == 'talk_input':
-                # Draw label prompt
-                self._draw_text("Ask Saif:", 270, 415, (200, 200, 210))
+                            # Grayed out because sub-menu is active
+                            draw_text_offset(option, 50, y_pos, (70, 70, 75))
                 
-                # Draw multiline text entry box outline
-                input_box_rect = pygame.Rect(270, 445, 250, 90)
-                pygame.draw.rect(self.screen, (16, 16, 20), input_box_rect)
-                pygame.draw.rect(self.screen, self.grid_color, input_box_rect, 1)
-                
-                # Wrap input text to multiple lines of max 22 characters per line
-                chars_per_line = 22
-                input_lines = [self.chat_input_text[i:i+chars_per_line] for i in range(0, len(self.chat_input_text), chars_per_line)]
-                if not input_lines:
-                    input_lines = [""]
-                
-                # Render wrapped text with flashing caret on the last active character
-                for idx, line in enumerate(input_lines):
-                    line_caret = ""
-                    if idx == len(input_lines) - 1:
-                        line_caret = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
-                    self._draw_text(line + line_caret, 280, 455 + idx * 25, (255, 255, 255))
-                
-                # Dynamic ESC/ENTER helper text aligned at the bottom
-                self._draw_text("ESC: Cancel | ENTER: Send", 270, 555, (150, 150, 150))
-                
-            elif self.combat_mode == 'talk_response':
-                # Render gold header
-                self._draw_text("Saif:", 270, 425, (238, 206, 112))
-                
-                # Split and dynamically wrap dialogue to fit Center Box column bounds safely
-                words = self.talk_response_text.split(' ')
-                lines = []
-                current_line = ""
-                for word in words:
-                    test_line = current_line + " " + word if current_line else word
-                    if len(test_line) < 22:
-                        current_line = test_line
-                    else:
-                        lines.append(current_line)
-                        current_line = word
-                if current_line:
-                    lines.append(current_line)
-                
-                # Draw dialogue lines
-                for idx, line in enumerate(lines[:4]):
-                    self._draw_text(line, 270, 460 + idx * 28, (245, 245, 245))
+                # COLUMN 2: Chat Log / Dialogue Box / Submenus (Center Box X: 250 to 540)
+                if self.combat_mode == 'talk_input':
+                    # Draw label prompt
+                    draw_text_offset("Ask Saif:", 270, 415, (200, 200, 210))
                     
-            elif self.combat_mode == 'victory':
-                self._draw_text("VICTORY!", 270, 410, (255, 215, 0))
-                self._draw_text("Gained 50 EXP", 270, 440, (30, 144, 255))
-                
-                # Render level-ups (stacking dynamically)
-                y_offset = 470
-                if self.levelled_up:
-                    self._draw_text(f"Player Lv. Up! Reached Lv. {self.player_level}", 270, y_offset, (46, 139, 87))
-                    y_offset += 25
-                if self.saif_recruited and self.saif_levelled_up:
-                    self._draw_text(f"Saif Lv. Up! Reached Lv. {self.saif_level}", 270, y_offset, (46, 139, 87))
-                    y_offset += 25
-                
-                if not self.levelled_up and not (self.saif_recruited and self.saif_levelled_up):
-                    self._draw_text("Press ENTER to continue", 270, 520, (100, 100, 110))
-                else:
-                    self._draw_text("Press ENTER to continue", 270, 550, (100, 100, 110))
+                    # Draw multiline text entry box outline
+                    input_box_rect = pygame.Rect(270, 445, 250, 90)
+                    draw_rect_offset((16, 16, 20), input_box_rect)
+                    draw_rect_offset(self.grid_color, input_box_rect, 1)
                     
-            elif self.combat_mode == 'special':
-                self._draw_text("SPECIAL MOVES", 270, 420, (238, 206, 112))
-                
-                # Check if Combo is available and not on cooldown
-                combo_text = "X-Strike (Combo)"
-                if not self.saif_recruited or self.saif_respect < 70:
-                    combo_text += " [Locked: 70+ Respect]"
-                    color = (100, 100, 110) # Grayed out
-                elif self.combo_cooldown > 0:
-                    combo_text += f" [Cooldown: {self.combo_cooldown} Turn{'s' if self.combo_cooldown > 1 else ''}]"
-                    color = (100, 100, 110) # Grayed out
-                else:
-                    color = (255, 215, 0) # Gold / Available
-                
-                self._draw_text(f"> {combo_text}", 270, 460, color)
-                self._draw_text("ESC: Back | ENTER: Execute", 270, 555, (150, 150, 150))
-                
-            elif self.combat_mode == 'item':
-                self._draw_text("INVENTORY", 270, 420, (238, 206, 112))
-                
-                potions = self.inventory.get("health_potion", 0)
-                item_text = f"Health Potion x{potions}"
-                if potions == 0:
-                    color = (100, 100, 110) # Grayed out
-                else:
-                    color = (245, 245, 245) # White / Available
-                
-                self._draw_text(f"> {item_text}", 270, 460, color)
-                self._draw_text("ESC: Back | ENTER: Use", 270, 555, (150, 150, 150))
-            
-            elif self.saif_excuse_active:
-                # Render gold header (or crimson for defiance excuse)
-                self._draw_text("Saif (Refused):", 270, 425, (220, 20, 60))
-                
-                # Split and dynamically wrap dialogue to fit Center Box column bounds safely
-                words = self.saif_excuse_text.split(' ')
-                lines = []
-                current_line = ""
-                for word in words:
-                    test_line = current_line + " " + word if current_line else word
-                    if len(test_line) < 22:
-                        current_line = test_line
-                    else:
+                    # Wrap input text to multiple lines of max 22 characters per line
+                    chars_per_line = 22
+                    input_lines = [self.chat_input_text[i:i+chars_per_line] for i in range(0, len(self.chat_input_text), chars_per_line)]
+                    if not input_lines:
+                        input_lines = [""]
+                    
+                    # Render wrapped text with flashing caret on the last active character
+                    for idx, line in enumerate(input_lines):
+                        line_caret = ""
+                        if idx == len(input_lines) - 1:
+                            line_caret = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+                        draw_text_offset(line + line_caret, 280, 455 + idx * 25, (255, 255, 255))
+                    
+                    # Dynamic ESC/ENTER helper text aligned at the bottom
+                    draw_text_offset("ESC: Cancel | ENTER: Send", 270, 555, (150, 150, 150))
+                    
+                elif self.combat_mode == 'talk_response':
+                    # Render gold header
+                    draw_text_offset("Saif:", 270, 425, (238, 206, 112))
+                    
+                    # Split and dynamically wrap dialogue to fit Center Box column bounds safely
+                    words = self.talk_response_text.split(' ')
+                    lines = []
+                    current_line = ""
+                    for word in words:
+                        test_line = current_line + " " + word if current_line else word
+                        if len(test_line) < 22:
+                            current_line = test_line
+                        else:
+                            lines.append(current_line)
+                            current_line = word
+                    if current_line:
                         lines.append(current_line)
-                        current_line = word
-                if current_line:
-                    lines.append(current_line)
+                    
+                    # Draw dialogue lines
+                    for idx, line in enumerate(lines[:4]):
+                        draw_text_offset(line, 270, 460 + idx * 28, (245, 245, 245))
+                        
+                elif self.combat_mode == 'victory':
+                    draw_text_offset("VICTORY!", 270, 410, (255, 215, 0))
+                    draw_text_offset("Gained 50 EXP", 270, 440, (30, 144, 255))
+                    
+                    # Render level-ups (stacking dynamically)
+                    y_offset = 470
+                    if self.levelled_up:
+                        draw_text_offset(f"Player Lv. Up! Reached Lv. {self.player_level}", 270, y_offset, (46, 139, 87))
+                        y_offset += 25
+                    if self.saif_recruited and self.saif_levelled_up:
+                        draw_text_offset(f"Saif Lv. Up! Reached Lv. {self.saif_level}", 270, y_offset, (46, 139, 87))
+                        y_offset += 25
+                    
+                    if not self.levelled_up and not (self.saif_recruited and self.saif_levelled_up):
+                        draw_text_offset("Press ENTER to continue", 270, 520, (100, 100, 110))
+                    else:
+                        draw_text_offset("Press ENTER to continue", 270, 550, (100, 100, 110))
+                        
+                elif self.combat_mode == 'special':
+                    draw_text_offset("SPECIAL MOVES", 270, 420, (238, 206, 112))
+                    
+                    # Check if Combo is available and not on cooldown
+                    combo_text = "X-Strike (Combo)"
+                    if not self.saif_recruited or self.saif_respect < 70:
+                        combo_text += " [Locked: 70+ Respect]"
+                        color = (100, 100, 110) # Grayed out
+                    elif self.combo_cooldown > 0:
+                        combo_text += f" [Cooldown: {self.combo_cooldown} Turn{'s' if self.combo_cooldown > 1 else ''}]"
+                        color = (100, 100, 110) # Grayed out
+                    else:
+                        color = (255, 215, 0) # Gold / Available
+                    
+                    draw_text_offset(f"> {combo_text}", 270, 460, color)
+                    draw_text_offset("ESC: Back | ENTER: Execute", 270, 555, (150, 150, 150))
+                    
+                elif self.combat_mode == 'item':
+                    draw_text_offset("INVENTORY", 270, 420, (238, 206, 112))
+                    
+                    potions = self.inventory.get("health_potion", 0)
+                    item_text = f"Health Potion x{potions}"
+                    if potions == 0:
+                        color = (100, 100, 110) # Grayed out
+                    else:
+                        color = (245, 245, 245) # White / Available
+                    
+                    draw_text_offset(f"> {item_text}", 270, 460, color)
+                    draw_text_offset("ESC: Back | ENTER: Use", 270, 555, (150, 150, 150))
                 
-                # Draw dialogue lines
-                for idx, line in enumerate(lines[:4]):
-                    self._draw_text(line, 270, 460 + idx * 28, (245, 245, 245))
-            
-            # COLUMN 3: Party HP & Respect Stats (Right Box X: 540 to 800)
-            # Stats Header
-            self._draw_text("PARTY STATUS", 560, 410, (238, 206, 112))
-            
-            # Player HP Bar
-            self._draw_text(f"PLAYER LV. {self.player_level} HP: {self.player_hp}/{self.player_max_hp}", 560, 425, (30, 144, 255))
-            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 445, 200, 6))
-            pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(560, 445, int(200 * (self.player_hp / self.player_max_hp)), 6))
-            
-            # Player EXP Bar
-            self._draw_text(f"EXP: {self.player_exp}/{self.exp_to_next_level}", 560, 455, (200, 200, 200))
-            pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 475, 200, 4))
-            pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(560, 475, int(200 * (self.player_exp / self.exp_to_next_level)), 4))
-            
-            # Saif HP and Respect Bars (only if recruited)
-            if self.saif_recruited:
-                self._draw_text(f"SAIF LV. {self.saif_level} HP: {self.saif_hp}/{self.saif_max_hp}", 560, 485, (46, 139, 87))
-                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 505, 200, 6))
-                pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(560, 505, int(200 * (self.saif_hp / self.saif_max_hp)), 6))
+                elif self.saif_excuse_active:
+                    # Render gold header (or crimson for defiance excuse)
+                    draw_text_offset("Saif (Refused):", 270, 425, (220, 20, 60))
+                    
+                    # Split and dynamically wrap dialogue to fit Center Box column bounds safely
+                    words = self.saif_excuse_text.split(' ')
+                    lines = []
+                    current_line = ""
+                    for word in words:
+                        test_line = current_line + " " + word if current_line else word
+                        if len(test_line) < 22:
+                            current_line = test_line
+                        else:
+                            lines.append(current_line)
+                            current_line = word
+                    if current_line:
+                        lines.append(current_line)
+                    
+                    # Draw dialogue lines
+                    for idx, line in enumerate(lines[:4]):
+                        draw_text_offset(line, 270, 460 + idx * 28, (245, 245, 245))
                 
-                # Saif EXP Bar
-                self._draw_text(f"EXP: {self.saif_exp}/{self.saif_exp_to_next_level}", 560, 515, (200, 200, 200))
-                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 535, 200, 4))
-                pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(560, 535, int(200 * (self.saif_exp / self.saif_exp_to_next_level)), 4))
+                # COLUMN 3: Party HP & Respect Stats (Right Box X: 540 to 800)
+                # Stats Header
+                draw_text_offset("PARTY STATUS", 560, 410, (238, 206, 112))
                 
-                # Saif Respect Meter (shows red DEFIANT status if respect < 50)
-                respect_color = (218, 165, 32)
-                respect_label = f"SAIF RESPECT: {self.saif_respect}/100"
-                if self.saif_respect < 50:
-                    respect_color = (220, 20, 60) # Flashing/Steady Red
-                    respect_label += " [DEFIANT]"
+                # Player HP Bar
+                draw_text_offset(f"PLAYER LV. {self.player_level} HP: {self.player_hp}/{self.player_max_hp}", 560, 425, (30, 144, 255))
+                draw_rect_offset((38, 38, 44), pygame.Rect(560, 445, 200, 6))
+                draw_rect_offset((30, 144, 255), pygame.Rect(560, 445, int(200 * (self.player_hp / self.player_max_hp)), 6))
                 
-                self._draw_text(respect_label, 560, 545, respect_color)
-                pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(560, 565, 200, 6))
-                pygame.draw.rect(self.screen, respect_color, pygame.Rect(560, 565, int(200 * (self.saif_respect / 100.0)), 6))
+                # Player EXP Bar
+                draw_text_offset(f"EXP: {self.player_exp}/{self.exp_to_next_level}", 560, 455, (200, 200, 200))
+                draw_rect_offset((38, 38, 44), pygame.Rect(560, 475, 200, 4))
+                draw_rect_offset((238, 206, 112), pygame.Rect(560, 475, int(200 * (self.player_exp / self.exp_to_next_level)), 4))
                 
-            # Draw potions count in Column 3
-            self._draw_text(f"POTIONS: {self.inventory.get('health_potion', 0)}", 560, 580, (238, 206, 112))
+                # Saif HP and Respect Bars (only if recruited)
+                if self.saif_recruited:
+                    draw_text_offset(f"SAIF LV. {self.saif_level} HP: {self.saif_hp}/{self.saif_max_hp}", 560, 485, (46, 139, 87))
+                    draw_rect_offset((38, 38, 44), pygame.Rect(560, 505, 200, 6))
+                    draw_rect_offset((46, 139, 87), pygame.Rect(560, 505, int(200 * (self.saif_hp / self.saif_max_hp)), 6))
+                    
+                    # Saif EXP Bar
+                    draw_text_offset(f"EXP: {self.saif_exp}/{self.saif_exp_to_next_level}", 560, 515, (200, 200, 200))
+                    draw_rect_offset((38, 38, 44), pygame.Rect(560, 535, 200, 4))
+                    draw_rect_offset((238, 206, 112), pygame.Rect(560, 535, int(200 * (self.saif_exp / self.saif_exp_to_next_level)), 4))
+                    
+                    # Saif Respect Meter (shows red DEFIANT status if respect < 50)
+                    respect_color = (218, 165, 32)
+                    respect_label = f"SAIF RESPECT: {self.saif_respect}/100"
+                    if self.saif_respect < 50:
+                        respect_color = (220, 20, 60) # Flashing/Steady Red
+                        respect_label += " [DEFIANT]"
+                    
+                    draw_text_offset(respect_label, 560, 545, respect_color)
+                    draw_rect_offset((38, 38, 44), pygame.Rect(560, 565, 200, 6))
+                    draw_rect_offset(respect_color, pygame.Rect(560, 565, int(200 * (self.saif_respect / 100.0)), 6))
+                    
+                # Draw potions count in Column 3
+                draw_text_offset(f"POTIONS: {self.inventory.get('health_potion', 0)}", 560, 580, (238, 206, 112))
             
-            # 3. Draw Top State Header Text with Dynamic Turn & Parry Warnings
-            if self.combat_turn == 'player':
-                self._draw_text("PLAYER TURN", self.width // 2, 50, (30, 144, 255), center=True)
-            elif self.combat_turn == 'saif':
-                self._draw_text("SAIF TURN", self.width // 2, 50, (46, 139, 87), center=True)
-            else:
-                if self.enemy_target == 'player':
-                    self._draw_text("ENEMY TURN - PARRY NOW!", self.width // 2, 50, (220, 20, 60), center=True)
+            # 3. Draw Top State Header Text with Dynamic Turn & Parry Warnings (hidden when ending)
+            if not self.is_combat_ending:
+                if self.combat_turn == 'player':
+                    self._draw_text("PLAYER TURN", self.width // 2, 50, (30, 144, 255), center=True)
+                elif self.combat_turn == 'saif':
+                    self._draw_text("SAIF TURN", self.width // 2, 50, (46, 139, 87), center=True)
                 else:
-                    self._draw_text("ENEMY TURN - TARGET: SAIF", self.width // 2, 50, (238, 206, 112), center=True)
+                    if self.enemy_target == 'player':
+                        self._draw_text("ENEMY TURN - PARRY NOW!", self.width // 2, 50, (220, 20, 60), center=True)
+                    else:
+                        self._draw_text("ENEMY TURN - TARGET: SAIF", self.width // 2, 50, (238, 206, 112), center=True)
 
             # Render and update floating texts in the combat state
             next_floating_texts = []
