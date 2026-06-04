@@ -11,6 +11,7 @@ class DataManager:
         self.enemies = {}
         self.maps = {}
         self.quests = {}
+        self.items = {}
         self.load_all_data()
 
     def load_all_data(self):
@@ -18,6 +19,7 @@ class DataManager:
         enemies_path = os.path.join(self.data_dir, "enemies.json")
         maps_path = os.path.join(self.data_dir, "maps.json")
         quests_path = os.path.join(self.data_dir, "quests.json")
+        items_path = os.path.join(self.data_dir, "items.json")
 
         # Load Enemies Database
         if os.path.exists(enemies_path):
@@ -52,6 +54,17 @@ class DataManager:
         else:
             print(f"[Warning] Quests database not found at {quests_path}")
 
+        # Load Items Database
+        if os.path.exists(items_path):
+            try:
+                with open(items_path, "r", encoding="utf-8") as f:
+                    self.items = json.load(f)
+                print(f"[DataManager] Loaded {len(self.items)} items successfully.")
+            except Exception as e:
+                print(f"[Warning] Failed to load items database: {e}")
+        else:
+            print(f"[Warning] Items database not found at {items_path}")
+
     def get_enemy_data(self, enemy_id: str) -> dict:
         """
         Retrieves data for a specific enemy ID.
@@ -80,4 +93,15 @@ class DataManager:
             return self.maps[map_id]
         
         print(f"[Error] Map ID '{map_id}' not found in Atlas.")
+        return None
+
+    def get_item_data(self, item_id: str) -> dict:
+        """
+        Retrieves specification details for a specific item ID.
+        Returns None if the item ID is not found.
+        """
+        if item_id in self.items:
+            return self.items[item_id]
+        
+        print(f"[Warning] Item ID '{item_id}' not found in Items database.")
         return None

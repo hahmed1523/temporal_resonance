@@ -5,7 +5,8 @@
     "base_damage": 5,
     "exp_yield": 20,
     "color": [0, 255, 0],
-    "size": 40
+    "size": 40,
+    "loot_drop": "iron_scrap"
   },
   "desert_bandit": {
     "name": "Desert Bandit",
@@ -13,6 +14,7 @@
     "base_damage": 12,
     "exp_yield": 50,
     "color": [220, 20, 60],
-    "size": 40
+    "size": 40,
+    "loot_drop": "small_potion"
   }
 }

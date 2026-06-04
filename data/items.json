@@ -1,0 +1,13 @@
+{
+  "small_potion": {
+    "name": "Small Potion",
+    "description": "Heals 30 HP.",
+    "type": "consumable",
+    "heal_amount": 30
+  },
+  "iron_scrap": {
+    "name": "Iron Scrap",
+    "description": "A piece of rusted iron. Useful for crafting.",
+    "type": "material"
+  }
+}

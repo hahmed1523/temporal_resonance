@@ -71,7 +71,7 @@ def reset_game_state():
         "api_base_url": api_base_url,
         "api_model": api_model,
         "llm_think": llm_think,
-        "inventory": {"health_potion": 0},
+        "inventory": {},
         "saif_refusal_queue": [],
         "current_location": "overworld",
         "global_flags": {

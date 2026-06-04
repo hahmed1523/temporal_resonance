@@ -81,6 +81,10 @@ class Game:
         # Initialize QuestManager
         self.quest_manager = QuestManager(self.data_manager, self)
         
+        # Initialize InventoryManager
+        from engine.inventory_manager import InventoryManager
+        self.inventory_manager = InventoryManager(self.data_manager, self)
+        
         # Track overworld position & camera variables for camp pack-up
         self.overworld_player_x = 960
         self.overworld_player_y = 1040
@@ -463,15 +467,17 @@ class Game:
         Chooses a rogue action (Self-Heal if potion is available, else Defend).
         Plays feedback sound/VFX, pops pre-fetched excuse instantly from queue.
         """
-        potions = self.inventory.get("health_potion", 0)
+        potions = self.inventory.get("small_potion", 0)
         if potions > 0:
             action_name = "Self-Heal"
-            self.inventory["health_potion"] = potions - 1
-            self.saif_hp = min(self.saif_max_hp, self.saif_hp + 50)
+            self.inventory_manager.remove_item("small_potion", 1)
+            item_data = self.data_manager.get_item_data("small_potion")
+            heal_amount = item_data.get("heal_amount", 30) if item_data else 30
+            self.saif_hp = min(self.saif_max_hp, self.saif_hp + heal_amount)
             
             # Spawn green healing text
             self.floating_texts.append({
-                "text": "+50 HP",
+                "text": f"+{heal_amount} HP",
                 "x": self.saif_combat_pos[0] + self.player.size // 2,
                 "y": self.saif_combat_pos[1],
                 "timer": 90,
@@ -538,6 +544,26 @@ class Game:
         
         self.combat_mode = 'victory'
         self.victory_start_time = pygame.time.get_ticks()
+        
+        # Award loot drop if configured
+        if hasattr(self, "enemy_type") and self.enemy_type:
+            enemy_info = self.data_manager.get_enemy_data(self.enemy_type)
+            if enemy_info and "loot_drop" in enemy_info:
+                loot_drop = enemy_info["loot_drop"]
+                item_data = self.data_manager.get_item_data(loot_drop)
+                item_name = item_data.get("name", loot_drop) if item_data else loot_drop
+                
+                self.inventory_manager.add_item(loot_drop, 1)
+                print(f"[Loot] Acquired {item_name}!")
+                
+                # Spawn floating text popup over the player square:
+                self.floating_texts.append({
+                    "text": f"Acquired {item_name}!",
+                    "x": self.player_combat_pos[0] + self.player.size // 2,
+                    "y": self.player_combat_pos[1] - 40,
+                    "timer": 120,
+                    "color": (46, 139, 87)
+                })
         
         # Trigger quest flags if defeating desert_bandit
         if hasattr(self, "enemy_type") and self.enemy_type == "desert_bandit":
@@ -702,7 +728,7 @@ class Game:
         self.api_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
         self.api_model = "gemini-2.5-flash"
         self.llm_think = True
-        self.inventory = {"health_potion": 0}
+        self.inventory = {}
         self.saif_refusal_queue = []
         self.current_location = "overworld"
         self.global_flags = {}
@@ -790,7 +816,7 @@ class Game:
         self.chest_opened = False
         self.saif_recruited = False
         self.chat_history = []
-        self.inventory = {"health_potion": 0}
+        self.inventory = {}
         self.saif_refusal_queue = []
         self.current_location = "overworld"
         self.global_flags = {"started_desert_quest": True, "desert_boss_defeated": False}
@@ -1110,10 +1136,8 @@ class Game:
                 self.elena_dialogue_active = False
                 self.active_camp_npc = None
             elif event.key == pygame.K_h:
-                # Elena cooks and gifts a Health Potion!
-                self.inventory["health_potion"] = self.inventory.get("health_potion", 0) + 1
-                self._save_game_state()
-                print("[Elena] Cooking Potion! Gifted to player.")
+                # Elena cooks and gifts a Small Potion!
+                self.inventory_manager.add_item("small_potion", 1)
                 self.elena_dialogue_active = False
                 self.active_camp_npc = None
             return
@@ -1184,10 +1208,9 @@ class Game:
                         # Clear map cell from 2 to 0
                         self.map_grid[r_idx][c_idx] = 0
                         self.chest_opened = True
-                        # Increment health_potion in inventory
-                        self.inventory["health_potion"] = self.inventory.get("health_potion", 0) + 1
-                        self._save_game_state()
-                        print("Found a Health Potion!")
+                        # Increment small_potion in inventory
+                        self.inventory_manager.add_item("small_potion", 1)
+                        print("Found a Small Potion!")
 
     def _handle_pause_menu_events(self, event):
         """Handles KEYDOWN events while in the overworld Pause Menu."""
@@ -1558,16 +1581,17 @@ class Game:
             self.combat_mode = 'menu'
             self.menu_index = 0
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            potions = self.inventory.get("health_potion", 0)
+            potions = self.inventory.get("small_potion", 0)
             if potions > 0:
                 if self.saif_recruited:
                     self.combat_mode = 'item_target'
                     print("[Combat] Item selected. Select target: 1 for Player, 2 for Saif.")
                 else:
-                    self.inventory["health_potion"] = potions - 1
-                    self.player_hp = min(self.player_max_hp, self.player_hp + 50)
-                    self._save_game_state()
-                    print(f"Used a Health Potion! Restored 50 HP. Player HP: {self.player_hp}")
+                    self.inventory_manager.remove_item("small_potion", 1)
+                    item_data = self.data_manager.get_item_data("small_potion")
+                    heal_amount = item_data.get("heal_amount", 30) if item_data else 30
+                    self.player_hp = min(self.player_max_hp, self.player_hp + heal_amount)
+                    print(f"Used a Small Potion! Restored {heal_amount} HP. Player HP: {self.player_hp}")
                     
                     self.combat_mode = 'menu'
                     self.menu_index = 0
@@ -1595,21 +1619,23 @@ class Game:
         if event.key == pygame.K_ESCAPE:
             self.combat_mode = 'menu'
         elif event.key in (pygame.K_1, pygame.K_KP1):
-            potions = self.inventory.get("health_potion", 0)
+            potions = self.inventory.get("small_potion", 0)
             if potions > 0:
-                self.inventory["health_potion"] = potions - 1
-                self.player_hp = min(self.player_max_hp, self.player_hp + 50)
-                self._save_game_state()
-                print(f"Used a Health Potion! Restored 50 HP to Player. Player HP: {self.player_hp}")
+                self.inventory_manager.remove_item("small_potion", 1)
+                item_data = self.data_manager.get_item_data("small_potion")
+                heal_amount = item_data.get("heal_amount", 30) if item_data else 30
+                self.player_hp = min(self.player_max_hp, self.player_hp + heal_amount)
+                print(f"Used a Small Potion! Restored {heal_amount} HP to Player. Player HP: {self.player_hp}")
                 self.combat_mode = 'menu'
                 self._end_current_turn()
         elif event.key in (pygame.K_2, pygame.K_KP2):
-            potions = self.inventory.get("health_potion", 0)
+            potions = self.inventory.get("small_potion", 0)
             if potions > 0:
-                self.inventory["health_potion"] = potions - 1
-                self.saif_hp = min(self.saif_max_hp, self.saif_hp + 50)
-                self._save_game_state()
-                print(f"Used a Health Potion! Restored 50 HP to Saif. Saif HP: {self.saif_hp}")
+                self.inventory_manager.remove_item("small_potion", 1)
+                item_data = self.data_manager.get_item_data("small_potion")
+                heal_amount = item_data.get("heal_amount", 30) if item_data else 30
+                self.saif_hp = min(self.saif_max_hp, self.saif_hp + heal_amount)
+                print(f"Used a Small Potion! Restored {heal_amount} HP to Saif. Saif HP: {self.saif_hp}")
                 self.combat_mode = 'menu'
                 self._end_current_turn()
 
@@ -2248,7 +2274,7 @@ class Game:
                     if self.saif_recruited:
                         hp_status += f"  |  Saif (Lv. {self.saif_level}) HP: {self.saif_hp}/{self.saif_max_hp} (EXP: {self.saif_exp}/{self.saif_exp_to_next_level}) (Respect: {self.saif_respect}/100)"
                     self._draw_text(hp_status, 130, 520, (30, 144, 255))
-                    self._draw_text(f"Potions: {self.inventory.get('health_potion', 0)}", 130, 545, (238, 206, 112))
+                    self._draw_text(f"Small Potion: {self.inventory.get('small_potion', 0)}", 130, 545, (238, 206, 112))
                     
                     if self.rest_notification_active:
                         self._draw_text("The party rested at the fire. HP fully restored!", 350, 455, (46, 139, 87))
@@ -2689,8 +2715,8 @@ class Game:
                 elif self.combat_mode == 'item':
                     draw_text_offset("INVENTORY", 270, 420, (238, 206, 112))
                     
-                    potions = self.inventory.get("health_potion", 0)
-                    item_text = f"Health Potion x{potions}"
+                    potions = self.inventory.get("small_potion", 0)
+                    item_text = f"Small Potion x{potions}"
                     if potions == 0:
                         color = (100, 100, 110) # Grayed out
                     else:
@@ -2758,7 +2784,7 @@ class Game:
                     draw_rect_offset(respect_color, pygame.Rect(560, 565, int(200 * (self.saif_respect / 100.0)), 6))
                     
                 # Draw potions count in Column 3
-                draw_text_offset(f"POTIONS: {self.inventory.get('health_potion', 0)}", 560, 580, (238, 206, 112))
+                draw_text_offset(f"SMALL POTION: {self.inventory.get('small_potion', 0)}", 560, 580, (238, 206, 112))
             
             # 3. Draw Top State Header Text with Dynamic Turn & Parry Warnings (hidden when ending)
             if not self.is_combat_ending:
