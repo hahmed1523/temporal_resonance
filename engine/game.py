@@ -9,6 +9,7 @@ from engine.player import Player
 from engine.enemy import Enemy
 from engine.chest import Chest
 from engine.sound_manager import SoundManager
+from engine.quest_manager import QuestManager
 
 from engine.llm_handler import generate_llm_response, save_api_key_to_env, fetch_refusal_dialogue, prewarm_llm
 from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE, CAMP_MAP_GRID
@@ -78,6 +79,9 @@ class Game:
         self.save_slot_file = "save_slot_1.json"
         self._load_game_state()
         
+        # Initialize QuestManager
+        self.quest_manager = QuestManager(self.data_manager, self)
+        
         # Track overworld position & camera variables for camp pack-up
         self.overworld_player_x = 960
         self.overworld_player_y = 1040
@@ -145,16 +149,17 @@ class Game:
         enemy_y = 1040
         enemy_color = (220, 20, 60)
         enemy_size = 40
+        self.enemy_type = "desert_bandit"
         
         if overworld_data and overworld_data.get("enemy_spawns"):
             first_enemy = overworld_data["enemy_spawns"][0]
-            enemy_type = first_enemy["type"]
+            self.enemy_type = first_enemy["type"]
             enemy_grid_pos = first_enemy["pos"]
             enemy_x = enemy_grid_pos[0] * self.tile_size
             enemy_y = enemy_grid_pos[1] * self.tile_size
             
             if self.data_manager:
-                enemy_info = self.data_manager.get_enemy_data(enemy_type)
+                enemy_info = self.data_manager.get_enemy_data(self.enemy_type)
                 enemy_color = tuple(enemy_info.get("color", [220, 20, 60]))
                 enemy_size = enemy_info.get("size", 40)
                 
@@ -418,7 +423,8 @@ class Game:
             "ollama_url": self.ollama_url,
             "api_base_url": self.api_base_url,
             "api_model": self.api_model,
-            "llm_think": self.llm_think
+            "llm_think": self.llm_think,
+            "global_flags": self.global_flags
         }
         t = threading.Thread(target=self._async_fetch_refusal_dialogue, args=(game_state,))
         t.daemon = True
@@ -509,6 +515,11 @@ class Game:
         """
         self.combat_mode = 'victory'
         self.victory_start_time = pygame.time.get_ticks()
+        
+        # Trigger quest flags if defeating desert_bandit
+        if hasattr(self, "enemy_type") and self.enemy_type == "desert_bandit":
+            if hasattr(self, "quest_manager") and self.quest_manager:
+                self.quest_manager.set_flag("desert_boss_defeated", True)
         
         # Award 50 EXP to player
         self.player_exp += 50
@@ -605,7 +616,8 @@ class Game:
             "ollama_url": self.ollama_url,
             "api_base_url": self.api_base_url,
             "api_model": self.api_model,
-            "llm_think": self.llm_think
+            "llm_think": self.llm_think,
+            "global_flags": self.global_flags
         }
         res_dict = generate_llm_response(self.chat_input_text, game_state)
         dialogue = res_dict.get("dialogue", "Saif remains silent.")
@@ -646,6 +658,7 @@ class Game:
         self.inventory = {"health_potion": 0}
         self.saif_refusal_queue = []
         self.current_location = "overworld"
+        self.global_flags = {}
         self.player_max_hp = 100
         self.player_level = 1
         self.player_exp = 0
@@ -688,6 +701,12 @@ class Game:
                     self.inventory = data.get("inventory", self.inventory)
                     self.saif_refusal_queue = data.get("saif_refusal_queue", [])[:3]
                     self.current_location = data.get("current_location", "overworld")
+                    self.global_flags = data.get("global_flags", {})
+                    # Ensure default flags are present
+                    if "started_desert_quest" not in self.global_flags:
+                        self.global_flags["started_desert_quest"] = True
+                    if "desert_boss_defeated" not in self.global_flags:
+                        self.global_flags["desert_boss_defeated"] = False
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -719,6 +738,7 @@ class Game:
         self.inventory = {"health_potion": 0}
         self.saif_refusal_queue = []
         self.current_location = "overworld"
+        self.global_flags = {"started_desert_quest": True, "desert_boss_defeated": False}
         
         # Load and preserve config keys from file if it exists
         if os.path.exists(self.state_file_path):
@@ -767,7 +787,8 @@ class Game:
             "llm_think": self.llm_think,
             "inventory": self.inventory,
             "saif_refusal_queue": self.saif_refusal_queue,
-            "current_location": self.current_location
+            "current_location": self.current_location,
+            "global_flags": self.global_flags
         }
         try:
             with open(self.state_file_path, 'w') as f:
@@ -810,7 +831,8 @@ class Game:
             "player_y": self.player.y,
             "camera_x": self.camera_x,
             "camera_y": self.camera_y,
-            "current_location": self.current_location
+            "current_location": self.current_location,
+            "global_flags": self.global_flags
         }
         try:
             with open(self.save_slot_file, 'w') as f:
@@ -858,6 +880,12 @@ class Game:
                     self.camera_x = data.get("camera_x", 0.0)
                     self.camera_y = data.get("camera_y", 0.0)
                     self.current_location = data.get("current_location", "overworld")
+                    self.global_flags = data.get("global_flags", {})
+                    # Ensure default flags are present
+                    if "started_desert_quest" not in self.global_flags:
+                        self.global_flags["started_desert_quest"] = True
+                    if "desert_boss_defeated" not in self.global_flags:
+                        self.global_flags["desert_boss_defeated"] = False
                 
                 # Align map grid tiles
                 if self.chest_opened and self.chest_x is not None:

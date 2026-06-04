@@ -73,7 +73,11 @@ def reset_game_state():
         "llm_think": llm_think,
         "inventory": {"health_potion": 0},
         "saif_refusal_queue": [],
-        "current_location": "overworld"
+        "current_location": "overworld",
+        "global_flags": {
+            "started_desert_quest": True,
+            "desert_boss_defeated": False
+        }
     }
     with open(state_file, "w") as f:
         json.dump(default_state, f, indent=2)

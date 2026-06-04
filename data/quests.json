@@ -1,0 +1,9 @@
+{
+  "main_quest_01": {
+    "name": "The Desert Threat",
+    "description": "Investigate the red square bandit camp.",
+    "trigger_flag": "started_desert_quest",
+    "completion_flag": "desert_boss_defeated",
+    "reward_exp": 100
+  }
+}

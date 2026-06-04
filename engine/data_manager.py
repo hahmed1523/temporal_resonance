@@ -10,12 +10,14 @@ class DataManager:
         self.data_dir = data_dir
         self.enemies = {}
         self.maps = {}
+        self.quests = {}
         self.load_all_data()
 
     def load_all_data(self):
         """Loads all JSON files into memory dictionaries."""
         enemies_path = os.path.join(self.data_dir, "enemies.json")
         maps_path = os.path.join(self.data_dir, "maps.json")
+        quests_path = os.path.join(self.data_dir, "quests.json")
 
         # Load Enemies Database
         if os.path.exists(enemies_path):
@@ -38,6 +40,17 @@ class DataManager:
                 print(f"[Warning] Failed to load maps database: {e}")
         else:
             print(f"[Warning] Maps database not found at {maps_path}")
+
+        # Load Quests Database
+        if os.path.exists(quests_path):
+            try:
+                with open(quests_path, "r", encoding="utf-8") as f:
+                    self.quests = json.load(f)
+                print(f"[DataManager] Loaded {len(self.quests)} quests successfully.")
+            except Exception as e:
+                print(f"[Warning] Failed to load quests database: {e}")
+        else:
+            print(f"[Warning] Quests database not found at {quests_path}")
 
     def get_enemy_data(self, enemy_id: str) -> dict:
         """

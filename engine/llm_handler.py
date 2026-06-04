@@ -260,10 +260,25 @@ def extract_json_payload(raw_text: str) -> dict:
 
 # ── Prompt Construction ───────────────────────────────────────────────────────
 
+def _build_world_context(global_flags: dict) -> str:
+    """Reads the global_flags dictionary and converts active flags into a single concise World Context string."""
+    if not global_flags:
+        return "World Context: The player has not yet started the desert quest."
+        
+    started = global_flags.get("started_desert_quest", False)
+    defeated = global_flags.get("desert_boss_defeated", False)
+    
+    if started and not defeated:
+        return "World Context: The player has started the desert quest but the boss is still alive."
+    elif started and defeated:
+        return "World Context: The player has completed the desert quest and the boss is defeated."
+    else:
+        return "World Context: The player has not yet started the desert quest."
+
 def _build_system_prompt(saif_respect: int, player_hp: int, enemy_hp: int,
                          in_combat: bool, current_location: str = "overworld") -> str:
     """Build the character system prompt with dynamic game state injection."""
-    core_desc = "You are Saif, a weary, pragmatic, and tactical warrior. Speak conversationally and directly. NEVER use poetic metaphors about the desert, sand, or the sun. Do not be overly dramatic. Use modern, grounded syntax."
+    core_desc = "You are Saif, a weary, pragmatic, and tactical warrior. Speak conversationally and directly. NEVER use poetic metaphors about the desert, sand, or the sun. Do not be overly dramatic. Use modern, grounded syntax. Pay close attention to the World Context at the very beginning of the prompt to understand active narrative events and whether bosses have been defeated."
     
     if current_location == 'combat':
         context = f"{core_desc} You are currently in a deadly battle. Keep your words sharp, tactical, and focused on survival. Your respect for the player is {saif_respect}/100."
@@ -334,6 +349,9 @@ def _call_ollama(system_prompt: str, user_prompt: str,
     print(f"\n=== [Ollama Request] ===")
     print(f"  Model: {model} | Think: {think}")
     print(f"  URL: {url}")
+    # Print the prepended World Context / first part of system prompt
+    context_line = system_prompt.split("\n")[0] if "\n" in system_prompt else system_prompt
+    print(f"  {context_line}")
     print(f"========================\n")
 
     try:
@@ -395,6 +413,8 @@ def _call_api(system_prompt: str, user_prompt: str,
     print(f"\n=== [API Request] ===")
     print(f"  Model: {model}")
     print(f"  URL: {url}")
+    context_line = system_prompt.split("\n")[0] if "\n" in system_prompt else system_prompt
+    print(f"  {context_line}")
     # TODO(security): Never log the API key
     print(f"  Key: {'*' * 8}...{api_key[-4:] if len(api_key) > 4 else '****'}")
     print(f"=====================\n")
@@ -539,7 +559,10 @@ def generate_llm_response(player_text: str, game_state: dict) -> dict:
     current_location = game_state.get("current_location", "overworld")
 
     # ── Build prompts ─────────────────────────────────────────────────────
+    global_flags = game_state.get("global_flags", {})
+    world_context = _build_world_context(global_flags)
     system_prompt = _build_system_prompt(saif_respect, player_hp, enemy_hp, in_combat, current_location)
+    system_prompt = world_context + "\n\n" + system_prompt
     user_prompt = _build_user_prompt(player_text, chat_history)
 
     # ── Provider dispatch ─────────────────────────────────────────────────
@@ -602,6 +625,9 @@ def fetch_refusal_dialogue(game_state: dict, recent_chat: list = None) -> list:
                 history_str += f'Player: "{exchange[0]}"\nSaif: "{exchange[1]}"\n'
         history_str = history_str.strip()
 
+    global_flags = game_state.get("global_flags", {})
+    world_context = _build_world_context(global_flags)
+
     system_prompt = (
         "You are Saif (or the active party member), a weary, pragmatic, and tactical warrior. Speak conversationally and directly. "
         "NEVER use poetic metaphors about the desert, sand, or the sun. Do not be overly dramatic. Use modern, grounded syntax. "
@@ -614,6 +640,7 @@ def fetch_refusal_dialogue(game_state: dict, recent_chat: list = None) -> list:
         "insulting, threatening, nice, or supportive, let that directly inform the tone, attitude, and reasons in your excuses). "
         "Do NOT include thinking tags or other markdown formatting. Return ONLY the raw JSON array."
     )
+    system_prompt = world_context + "\n\n" + system_prompt
     
     raw_text = None
     if provider == "ollama":
@@ -723,7 +750,8 @@ def prewarm_llm(game_state: dict) -> bool:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=20) as response:
+            # Increased timeout to 60s for cold model loading
+            with urllib.request.urlopen(req, timeout=60) as response:
                 response.read()
                 print("[LLM Prewarm] Ollama pre-warming complete.")
                 return True
@@ -754,7 +782,8 @@ def prewarm_llm(game_state: dict) -> bool:
                 },
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=20) as response:
+            # Increased timeout to 60s for cold model loading
+            with urllib.request.urlopen(req, timeout=60) as response:
                 response.read()
                 print("[LLM Prewarm] API pre-warming complete.")
                 return True
@@ -807,7 +836,8 @@ def wake_up_llm(player_level: int = 1, config: dict = None) -> str:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=15) as response:
+            # Increased timeout to 60s for cold model loading
+            with urllib.request.urlopen(req, timeout=60) as response:
                 res_body = response.read().decode("utf-8")
                 res_json = json.loads(res_body)
                 raw_text = res_json.get("message", {}).get("content", "").strip()
@@ -836,7 +866,8 @@ def wake_up_llm(player_level: int = 1, config: dict = None) -> str:
                     },
                     method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=15) as response:
+                # Increased timeout to 60s for cold model loading
+                with urllib.request.urlopen(req, timeout=60) as response:
                     res_body = response.read().decode("utf-8")
                     res_json = json.loads(res_body)
                     raw_text = res_json["choices"][0]["message"]["content"].strip()
