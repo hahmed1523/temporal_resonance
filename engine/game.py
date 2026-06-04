@@ -73,6 +73,10 @@ class Game:
         
         # Font for Combat UI Text
         self.font = pygame.font.SysFont(None, 32)
+        self.small_font = pygame.font.SysFont(None, 24)
+        
+        # Party menu state configuration
+        self.menu_selection = 'party'
         
         # JSON State Configuration
         self.state_file_path = os.path.join("data", "game_state.json")
@@ -1126,6 +1130,8 @@ class Game:
                 elif self.state == 'combat_state':
                     if not self.is_sliding and not self.is_combat_ending:
                         self._handle_combat_events(event)
+                elif self.state == 'party_menu_state':
+                    self._handle_party_menu_events(event)
 
     # ── State-specific event handlers ────────────────────────────────────
 
@@ -1183,6 +1189,10 @@ class Game:
             self.state = 'pause_menu_state'
             self.pause_menu_index = 0
             self.save_confirmed_time = 0
+        elif event.key == pygame.K_TAB:
+            self.state = 'party_menu_state'
+            self.menu_selection = 'party'
+            self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_c:
             self._transition_to_camp()
         elif event.key == pygame.K_e:
@@ -1237,6 +1247,18 @@ class Game:
                     self.main_menu_index = 0
                 else:
                     self.main_menu_index = 1
+
+    def _handle_party_menu_events(self, event):
+        """Handles navigation and selection inside the Party Menu state."""
+        if event.key in (pygame.K_TAB, pygame.K_ESCAPE):
+            self.state = 'exploration_state'
+            self.sound_manager.play_sfx("menu_select")
+        elif event.key in (pygame.K_UP, pygame.K_DOWN):
+            self.sound_manager.play_sfx("menu_select")
+            if self.menu_selection == 'party':
+                self.menu_selection = 'items'
+            else:
+                self.menu_selection = 'party'
 
     def _handle_main_menu_events(self, event):
         """Handles KEYDOWN events on the Main Menu."""
@@ -2151,7 +2173,7 @@ class Game:
             # Version/Info
             self._draw_text("Use UP/DOWN to navigate | ENTER to select", self.width // 2, 550, (100, 100, 110), center=True)
             
-        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state', 'combat_state'):
+        elif self.state in ('exploration_state', 'dialogue_state', 'pause_menu_state', 'camp_state', 'combat_state', 'party_menu_state'):
             # Render solid grey walls from map grid first with frustum culling
             if self.map_grid:
                 tile_size = self.tile_size
@@ -2373,7 +2395,125 @@ class Game:
                 if pygame.time.get_ticks() - self.save_confirmed_time < 2000:
                     self._draw_text("Game Saved Successfully!", self.width // 2, 395, (46, 139, 87), center=True)
 
-
+            # Render Party Menu on top if in party_menu_state
+            if self.state == 'party_menu_state':
+                # Create a semi-transparent screen-sized rectangle to dim the overworld
+                overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, 150))
+                self.screen.blit(overlay, (0, 0))
+                
+                # Slate-gray canvas with a thick white border
+                canvas_x = 100
+                canvas_y = 100
+                canvas_w = 600
+                canvas_h = 400
+                slate_gray = (50, 60, 75)
+                white = (255, 255, 255)
+                
+                pygame.draw.rect(self.screen, slate_gray, pygame.Rect(canvas_x, canvas_y, canvas_w, canvas_h))
+                # Optional slightly darker left sidebar background
+                pygame.draw.rect(self.screen, (38, 48, 62), pygame.Rect(canvas_x, canvas_y, 160, canvas_h))
+                # Canvas border
+                pygame.draw.rect(self.screen, white, pygame.Rect(canvas_x, canvas_y, canvas_w, canvas_h), 4)
+                # Vertical column divider line
+                pygame.draw.line(self.screen, white, (canvas_x + 160, canvas_y), (canvas_x + 160, canvas_y + canvas_h), 2)
+                
+                # Navigation sidebar options: 'Party' and 'Items'
+                party_color = (238, 206, 112) if self.menu_selection == 'party' else (150, 150, 150)
+                items_color = (238, 206, 112) if self.menu_selection == 'items' else (150, 150, 150)
+                
+                # Highlight backgrounds
+                if self.menu_selection == 'party':
+                    pygame.draw.rect(self.screen, (60, 75, 95), pygame.Rect(canvas_x + 6, canvas_y + 35, 148, 40))
+                elif self.menu_selection == 'items':
+                    pygame.draw.rect(self.screen, (60, 75, 95), pygame.Rect(canvas_x + 6, canvas_y + 85, 148, 40))
+                
+                self._draw_text("Party", canvas_x + 20, canvas_y + 43, party_color)
+                self._draw_text("Items", canvas_x + 20, canvas_y + 93, items_color)
+                
+                # Navigation controls helper text
+                self._draw_small_text("UP/DOWN: Navigate", canvas_x + 12, canvas_y + 340, (170, 170, 170))
+                self._draw_small_text("TAB/ESC: Close", canvas_x + 12, canvas_y + 365, (170, 170, 170))
+                
+                # Render right column data panel
+                right_x = canvas_x + 180
+                
+                if self.menu_selection == 'party':
+                    self._draw_text("PARTY OVERVIEW", right_x, canvas_y + 20, (238, 206, 112))
+                    pygame.draw.line(self.screen, (100, 110, 125), (right_x, canvas_y + 50), (canvas_x + canvas_w - 20, canvas_y + 50), 1)
+                    
+                    # 1. Player Row
+                    self._draw_text(f"Player (Lv. {self.player_level})", right_x, canvas_y + 65, (30, 144, 255))
+                    self._draw_small_text(f"HP: {self.player_hp} / {self.player_max_hp}", right_x, canvas_y + 95, (245, 245, 245))
+                    # Health Bar
+                    pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x, canvas_y + 115, 180, 10))
+                    if self.player_max_hp > 0:
+                        hp_ratio = max(0.0, min(1.0, self.player_hp / self.player_max_hp))
+                        pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(right_x, canvas_y + 115, int(180 * hp_ratio), 10))
+                    
+                    # Player EXP
+                    self._draw_small_text(f"EXP: {self.player_exp} / {self.exp_to_next_level}", right_x + 210, canvas_y + 95, (200, 200, 200))
+                    pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x + 210, canvas_y + 115, 180, 10))
+                    if self.exp_to_next_level > 0:
+                        exp_ratio = max(0.0, min(1.0, self.player_exp / self.exp_to_next_level))
+                        pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(right_x + 210, canvas_y + 115, int(180 * exp_ratio), 10))
+                    
+                    # 2. Saif Row
+                    if self.saif_recruited:
+                        self._draw_text(f"Saif (Lv. {self.saif_level})", right_x, canvas_y + 160, (46, 139, 87))
+                        self._draw_small_text(f"HP: {self.saif_hp} / {self.saif_max_hp}", right_x, canvas_y + 190, (245, 245, 245))
+                        # Health Bar
+                        pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x, canvas_y + 210, 180, 10))
+                        if self.saif_max_hp > 0:
+                            hp_ratio = max(0.0, min(1.0, self.saif_hp / self.saif_max_hp))
+                            pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(right_x, canvas_y + 210, int(180 * hp_ratio), 10))
+                        
+                        # Saif EXP
+                        self._draw_small_text(f"EXP: {self.saif_exp} / {self.saif_exp_to_next_level}", right_x + 210, canvas_y + 190, (200, 200, 200))
+                        pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x + 210, canvas_y + 210, 180, 10))
+                        if self.saif_exp_to_next_level > 0:
+                            exp_ratio = max(0.0, min(1.0, self.saif_exp / self.saif_exp_to_next_level))
+                            pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(right_x + 210, canvas_y + 210, int(180 * exp_ratio), 10))
+                        
+                        # Saif Respect
+                        respect_color = (218, 165, 32)
+                        respect_label = f"Respect: {self.saif_respect} / 100"
+                        if self.saif_respect < 50:
+                            respect_color = (220, 20, 60)
+                            respect_label += " [DEFIANT]"
+                        self._draw_small_text(respect_label, right_x, canvas_y + 245, respect_color)
+                        pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x, canvas_y + 265, 180, 10))
+                        respect_ratio = max(0.0, min(1.0, self.saif_respect / 100.0))
+                        pygame.draw.rect(self.screen, respect_color, pygame.Rect(right_x, canvas_y + 265, int(180 * respect_ratio), 10))
+                        
+                elif self.menu_selection == 'items':
+                    self._draw_text("INVENTORY ITEMS", right_x, canvas_y + 20, (238, 206, 112))
+                    pygame.draw.line(self.screen, (100, 110, 125), (right_x, canvas_y + 50), (canvas_x + canvas_w - 20, canvas_y + 50), 1)
+                    
+                    # Filter positive inventory items
+                    active_items = {k: v for k, v in self.inventory.items() if v > 0}
+                    if not active_items:
+                        self._draw_text("Inventory is empty.", right_x, canvas_y + 70, (150, 150, 150))
+                    else:
+                        item_y = canvas_y + 65
+                        for item_id, qty in active_items.items():
+                            item_data = self.data_manager.get_item_data(item_id)
+                            item_name = item_data.get("name", item_id) if item_data else item_id
+                            item_desc = item_data.get("description", "") if item_data else ""
+                            
+                            # Draw item card slot
+                            pygame.draw.rect(self.screen, (38, 48, 62), pygame.Rect(right_x, item_y, 400, 55))
+                            pygame.draw.rect(self.screen, (60, 70, 85), pygame.Rect(right_x, item_y, 400, 55), 1)
+                            
+                            # Draw name and quantity
+                            self._draw_text(item_name, right_x + 15, item_y + 6, (245, 245, 245))
+                            self._draw_text(f"x{qty}", right_x + 350, item_y + 6, (238, 206, 112))
+                            
+                            # Draw description
+                            if item_desc:
+                                self._draw_small_text(item_desc, right_x + 15, item_y + 32, (180, 180, 180))
+                                
+                            item_y += 65
             
         elif self.state == 'settings_state':
             # ── LLM Settings Screen ──────────────────────────────────────
@@ -2847,3 +2987,15 @@ class Game:
             pygame.draw.line(self.screen, self.grid_color, (x, 0), (x, self.height), 1)
         for y in range(start_y, self.height, grid_size):
             pygame.draw.line(self.screen, self.grid_color, (0, y), (self.width, y), 1)
+
+    def _draw_small_text(self, text: str, x: int, y: int, color: tuple = (255, 255, 255), center: bool = False):
+        """
+        Helper utility to render and draw smaller text.
+        """
+        text_surface = self.small_font.render(text, True, color)
+        text_rect = text_surface.get_rect()
+        if center:
+            text_rect.center = (x, y)
+            self.screen.blit(text_surface, text_rect)
+        else:
+            self.screen.blit(text_surface, (x, y))

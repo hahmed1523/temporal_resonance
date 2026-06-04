@@ -21,7 +21,7 @@ class SoundManager:
             "menu_select": "assets/audio/menu_select.wav"
         }
         self.bgm_tracks = {
-            "overworld": "assets/audio/overworld_theme.mp3",
+            "overworld": "assets/audio/explore_1.mp3",
             "combat": "assets/audio/battle_theme.mp3",
             "camp": "assets/audio/camp_theme.mp3",
             "title": "assets/audio/title_theme.ogg"
