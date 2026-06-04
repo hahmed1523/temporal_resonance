@@ -1,0 +1,18 @@
+{
+  "goblin_grunt": {
+    "name": "Goblin Grunt",
+    "max_hp": 30,
+    "base_damage": 5,
+    "exp_yield": 20,
+    "color": [0, 255, 0],
+    "size": 40
+  },
+  "desert_bandit": {
+    "name": "Desert Bandit",
+    "max_hp": 60,
+    "base_damage": 12,
+    "exp_yield": 50,
+    "color": [220, 20, 60],
+    "size": 40
+  }
+}

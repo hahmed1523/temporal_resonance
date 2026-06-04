@@ -12,7 +12,7 @@ import pygame
 
 
 from engine.game import Game
-from engine.level_maps import DEFAULT_MAP_GRID
+from engine.data_manager import DataManager
 
 
 def reset_game_state():
@@ -98,12 +98,15 @@ def main():
     except Exception as e:
         print(f"[Warning] Failed to initialize pygame mixer: {e}. Running in silent mode.")
 
-    # Create the game manager instance using our level map grid
+    # Create the DataManager instance to load database configurations
+    data_manager = DataManager()
+
+    # Create the game manager instance
     game = Game(
         width=800,
         height=600,
         title="Temporal Resonance - Core Engine Prototype",
-        map_grid=DEFAULT_MAP_GRID
+        data_manager=data_manager
     )
     
     # Fire off LLM wakeup handshake in background (MainMenu state initialization)

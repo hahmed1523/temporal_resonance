@@ -19,7 +19,7 @@ class Game:
     Main Game engine class.
     Manages the Pygame lifecycle, event handling, updating state, and rendering.
     """
-    def __init__(self, width: int = 800, height: int = 600, title: str = "Temporal Resonance", map_grid: list = None):
+    def __init__(self, width: int = 800, height: int = 600, title: str = "Temporal Resonance", data_manager=None):
         """
         Initializes Pygame, sets up the screen, game clock, and game entities.
         """
@@ -44,9 +44,21 @@ class Game:
         self.screen = pygame.display.set_mode((self.width, self.height))
         pygame.display.set_caption(title)
         
-        # Load level map grid
-        self.overworld_map_grid = map_grid if map_grid is not None else DEFAULT_MAP_GRID
-        self.camp_map_grid = CAMP_MAP_GRID
+        # Load level map grids from DataManager
+        self.data_manager = data_manager
+        overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
+        camp_data = self.data_manager.get_map_data("camp") if self.data_manager else None
+        
+        if overworld_data:
+            self.overworld_map_grid = [list(row) for row in overworld_data["grid"]]
+        else:
+            self.overworld_map_grid = DEFAULT_MAP_GRID
+            
+        if camp_data:
+            self.camp_map_grid = [list(row) for row in camp_data["grid"]]
+        else:
+            self.camp_map_grid = CAMP_MAP_GRID
+            
         self.map_grid = self.overworld_map_grid
         
         # Game loop control and clock
@@ -118,12 +130,35 @@ class Game:
         self.camera_x = 0.0
         self.camera_y = 0.0
         
-        # Initialize Game Entities in the middle of the 50x50 world space
-        # Tile row 26, col 24 is (960, 1040)
-        self.player = Player(960, 1040)
+        # Initialize Game Entities from maps.json / enemies.json
+        overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
         
-        # Static enemy at tile row 26, col 28
-        self.enemy = Enemy(1120, 1040)
+        player_x = 960
+        player_y = 1040
+        if overworld_data and "player_spawn" in overworld_data:
+            player_x = overworld_data["player_spawn"][0] * self.tile_size
+            player_y = overworld_data["player_spawn"][1] * self.tile_size
+            
+        self.player = Player(player_x, player_y)
+        
+        enemy_x = 1120
+        enemy_y = 1040
+        enemy_color = (220, 20, 60)
+        enemy_size = 40
+        
+        if overworld_data and overworld_data.get("enemy_spawns"):
+            first_enemy = overworld_data["enemy_spawns"][0]
+            enemy_type = first_enemy["type"]
+            enemy_grid_pos = first_enemy["pos"]
+            enemy_x = enemy_grid_pos[0] * self.tile_size
+            enemy_y = enemy_grid_pos[1] * self.tile_size
+            
+            if self.data_manager:
+                enemy_info = self.data_manager.get_enemy_data(enemy_type)
+                enemy_color = tuple(enemy_info.get("color", [220, 20, 60]))
+                enemy_size = enemy_info.get("size", 40)
+                
+        self.enemy = Enemy(enemy_x, enemy_y, size=enemy_size, color=enemy_color)
         
         # Golden Chest — position derived from grid scan below
         self.chest = None
@@ -1108,15 +1143,25 @@ class Game:
                 reset_game_state() # Overwrites game_state.json with defaults
                 self._load_game_state() # Load defaults in memory
                 
-                # Reset physical map cells (close chest)
-                if self.chest_x is not None:
-                    c_idx = int(self.chest_x // self.tile_size)
-                    r_idx = int(self.chest_y // self.tile_size)
-                    self.map_grid[r_idx][c_idx] = 2
-                
+                # Reset map grid copies from DataManager templates
+                overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
+                camp_data = self.data_manager.get_map_data("camp") if self.data_manager else None
+                if overworld_data:
+                    self.overworld_map_grid = [list(row) for row in overworld_data["grid"]]
+                if camp_data:
+                    self.camp_map_grid = [list(row) for row in camp_data["grid"]]
                 self.map_grid = self.overworld_map_grid
+                
                 self.current_location = "overworld"
-                self.player.x, self.player.y = 960, 1040 # Reset starting position
+                
+                # Reset starting positions from DataManager Atlas
+                player_x = 960
+                player_y = 1040
+                if overworld_data and "player_spawn" in overworld_data:
+                    player_x = overworld_data["player_spawn"][0] * self.tile_size
+                    player_y = overworld_data["player_spawn"][1] * self.tile_size
+                self.player.x, self.player.y = player_x, player_y
+                
                 self.enemy_hp = 100
                 self.player_hp = self.player_max_hp
                 self.saif_hp = self.saif_max_hp
@@ -2322,12 +2367,12 @@ class Game:
             else:
                 pygame.draw.rect(self.screen, self.enemy.color, enemy_rect)
             
-            # Draw floating Crimson Red Enemy HP above the red square in upper arena
+            # Draw floating Enemy HP above the square in upper arena
             enemy_x = int(self.enemy_combat_current_pos[0])
             enemy_y = int(self.enemy_combat_current_pos[1])
-            self._draw_text(f"HP: {self.enemy_hp}/100", enemy_x - 10, enemy_y - 40, (220, 20, 60))
+            self._draw_text(f"HP: {self.enemy_hp}/100", enemy_x - 10, enemy_y - 40, self.enemy.color)
             pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(enemy_x - 10, enemy_y - 15, 60, 6))
-            pygame.draw.rect(self.screen, (220, 20, 60), pygame.Rect(enemy_x - 10, enemy_y - 15, int(60 * (self.enemy_hp / 100.0)), 6))
+            pygame.draw.rect(self.screen, self.enemy.color, pygame.Rect(enemy_x - 10, enemy_y - 15, int(60 * (self.enemy_hp / 100.0)), 6))
             
             # 2. Draw Bottom Combat Action Menu (Bottom 1/3: Y: 400 to 600)
             # Fill bottom 200px area with lighter charcoal panel
