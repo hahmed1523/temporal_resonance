@@ -106,6 +106,14 @@ class Game:
         
         # Initialize Game State
         self.state = 'main_menu_state'
+        self.state_before_pause = None
+        
+        # Party menu navigation state
+        self.party_menu_focus = 'sidebar'
+        self.inventory_index = 0
+        self.target_index = 0
+        self.player_heal_flash_frames = 0
+        self.saif_heal_flash_frames = 0
         
         # Loader & Transition State Variables
         self.load_progress = 0.0
@@ -299,14 +307,15 @@ class Game:
         elif self.saif_recruited and self.saif_respect <= 20:
             print("[System] WARNING: Saif's respect is critically low (<= 20)!")
 
-    def _reset_combat_only_state(self):
+    def _reset_combat_only_state(self, restore_hp=False):
         """
         Resets combat-specific variables only, preserving long-term relationship
         metrics like respect and recruitment status.
         """
-        self.player_hp = self.player_max_hp
+        if restore_hp:
+            self.player_hp = self.player_max_hp
+            self.saif_hp = self.saif_max_hp
         self.enemy_hp = 100
-        self.saif_hp = self.saif_max_hp
         self.combat_turn = 'player'
         self.combat_mode = 'menu'
         self.enemy_combat_current_pos = list(self.enemy_combat_start_pos)
@@ -1186,12 +1195,16 @@ class Game:
     def _handle_exploration_events(self, event):
         """Handles KEYDOWN events while exploring the overworld."""
         if event.key == pygame.K_ESCAPE:
+            self.state_before_pause = self.state
             self.state = 'pause_menu_state'
             self.pause_menu_index = 0
             self.save_confirmed_time = 0
         elif event.key == pygame.K_TAB:
             self.state = 'party_menu_state'
             self.menu_selection = 'party'
+            self.party_menu_focus = 'sidebar'
+            self.inventory_index = 0
+            self.target_index = 0
             self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_c:
             self._transition_to_camp()
@@ -1231,11 +1244,11 @@ class Game:
             self.pause_menu_index = (self.pause_menu_index + 1) % len(self.pause_menu_options)
             self.sound_manager.play_sfx("menu_select")
         elif event.key == pygame.K_ESCAPE:
-            self.state = 'exploration_state'
+            self.state = getattr(self, 'state_before_pause', None) or 'exploration_state'
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             selection = self.pause_menu_options[self.pause_menu_index]
             if selection == "Resume":
-                self.state = 'exploration_state'
+                self.state = getattr(self, 'state_before_pause', None) or 'exploration_state'
             elif selection == "Save Game":
                 self._save_to_save_slot_1()
                 self.save_confirmed_time = pygame.time.get_ticks()
@@ -1251,14 +1264,97 @@ class Game:
     def _handle_party_menu_events(self, event):
         """Handles navigation and selection inside the Party Menu state."""
         if event.key in (pygame.K_TAB, pygame.K_ESCAPE):
-            self.state = 'exploration_state'
-            self.sound_manager.play_sfx("menu_select")
-        elif event.key in (pygame.K_UP, pygame.K_DOWN):
-            self.sound_manager.play_sfx("menu_select")
-            if self.menu_selection == 'party':
-                self.menu_selection = 'items'
+            if self.party_menu_focus == 'targeting':
+                self.party_menu_focus = 'items_list'
+                self.sound_manager.play_sfx("menu_select")
+            elif self.party_menu_focus == 'items_list':
+                self.party_menu_focus = 'sidebar'
+                self.sound_manager.play_sfx("menu_select")
             else:
-                self.menu_selection = 'party'
+                self.state = 'exploration_state'
+                self.sound_manager.play_sfx("menu_select")
+            return
+
+        active_items_list = [k for k, v in self.inventory.items() if v > 0]
+
+        if self.party_menu_focus == 'sidebar':
+            if event.key in (pygame.K_UP, pygame.K_DOWN):
+                self.sound_manager.play_sfx("menu_select")
+                if self.menu_selection == 'party':
+                    self.menu_selection = 'items'
+                else:
+                    self.menu_selection = 'party'
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_RIGHT):
+                if self.menu_selection == 'items':
+                    if active_items_list:
+                        self.party_menu_focus = 'items_list'
+                        self.inventory_index = 0
+                        self.sound_manager.play_sfx("menu_select")
+                    else:
+                        print("Inventory is empty!")
+
+        elif self.party_menu_focus == 'items_list':
+            if event.key == pygame.K_UP:
+                if len(active_items_list) > 0:
+                    self.inventory_index = (self.inventory_index - 1) % len(active_items_list)
+                    self.sound_manager.play_sfx("menu_select")
+            elif event.key == pygame.K_DOWN:
+                if len(active_items_list) > 0:
+                    self.inventory_index = (self.inventory_index + 1) % len(active_items_list)
+                    self.sound_manager.play_sfx("menu_select")
+            elif event.key == pygame.K_LEFT:
+                self.party_menu_focus = 'sidebar'
+                self.sound_manager.play_sfx("menu_select")
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                if 0 <= self.inventory_index < len(active_items_list):
+                    item_id = active_items_list[self.inventory_index]
+                    item_info = self.data_manager.get_item_data(item_id)
+                    if item_info and item_info.get("type") == "consumable":
+                        self.party_menu_focus = 'targeting'
+                        self.target_index = 0
+                        self.sound_manager.play_sfx("menu_select")
+                    else:
+                        print("This item is not consumable!")
+
+        elif self.party_menu_focus == 'targeting':
+            targets = ['Player']
+            if self.saif_recruited:
+                targets.append('Saif')
+                
+            if event.key == pygame.K_UP:
+                self.target_index = (self.target_index - 1) % len(targets)
+                self.sound_manager.play_sfx("menu_select")
+            elif event.key == pygame.K_DOWN:
+                self.target_index = (self.target_index + 1) % len(targets)
+                self.sound_manager.play_sfx("menu_select")
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                item_id = active_items_list[self.inventory_index]
+                item_info = self.data_manager.get_item_data(item_id)
+                target = targets[self.target_index]
+                
+                # Verify item quantity is available
+                if self.inventory.get(item_id, 0) > 0 and item_info:
+                    heal_amount = item_info.get("effect_value") or item_info.get("heal_amount") or 30
+                    if target == 'Player':
+                        self.player_hp = min(self.player_max_hp, self.player_hp + heal_amount)
+                        self.player_heal_flash_frames = 15
+                    elif target == 'Saif':
+                        self.saif_hp = min(self.saif_max_hp, self.saif_hp + heal_amount)
+                        self.saif_heal_flash_frames = 15
+                    
+                    # Subtract from ledger
+                    self.inventory_manager.remove_item(item_id, 1)
+                    
+                    # Play sound
+                    self.sound_manager.play_sfx("heal")
+                    
+                    # Return focus to items list
+                    active_items_list = [k for k, v in self.inventory.items() if v > 0]
+                    if not active_items_list:
+                        self.party_menu_focus = 'sidebar'
+                    else:
+                        self.inventory_index = min(self.inventory_index, len(active_items_list) - 1)
+                        self.party_menu_focus = 'items_list'
 
     def _handle_main_menu_events(self, event):
         """Handles KEYDOWN events on the Main Menu."""
@@ -1460,7 +1556,10 @@ class Game:
                 return
 
         if event.key == pygame.K_ESCAPE and self.combat_mode == 'menu':
-            self.is_running = False
+            self.state_before_pause = self.state
+            self.state = 'pause_menu_state'
+            self.pause_menu_index = 0
+            self.save_confirmed_time = 0
 
         if self.combat_turn in ('player', 'saif'):
             if self.combat_mode == 'menu':
@@ -1683,6 +1782,12 @@ class Game:
         """
         # Maintain background music state
         self._update_bgm()
+
+        # Update party menu heal flash timers/frames
+        if hasattr(self, 'player_heal_flash_frames') and self.player_heal_flash_frames > 0:
+            self.player_heal_flash_frames -= 1
+        if hasattr(self, 'saif_heal_flash_frames') and self.saif_heal_flash_frames > 0:
+            self.saif_heal_flash_frames -= 1
 
         # Allow movement/updates in both exploration and camp states
         if self.state in ('exploration_state', 'camp_state'):
@@ -2014,7 +2119,7 @@ class Game:
                     # Check if either HP hits 0 to end battle
                     if self.player_hp <= 0 or (self.saif_recruited and self.saif_hp <= 0):
                         print("Battle Over! Defeat.")
-                        self._reset_combat_only_state()
+                        self._reset_combat_only_state(restore_hp=True)
                         self.current_location = "overworld"
                         self.state = 'exploration_state'
                         self._knockback_player()
@@ -2214,15 +2319,16 @@ class Game:
                 pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
             
             # Render game entities with camera offsets (only in overworld!)
+            is_in_combat = (self.state == 'combat_state' or (self.state == 'pause_menu_state' and getattr(self, 'state_before_pause', None) == 'combat_state'))
             if self.map_grid != self.camp_map_grid:
-                if self.state != 'combat_state' and self.enemy and not self.enemy_defeated_and_removed:
+                if not is_in_combat and self.enemy and not self.enemy_defeated_and_removed:
                     self.enemy.draw(self.screen, self.camera_x, self.camera_y)
                 if self.chest_x is not None:
                     c_idx = int(self.chest_x // self.tile_size)
                     r_idx = int(self.chest_y // self.tile_size)
                     if self.map_grid[r_idx][c_idx] == 2:
                         self.chest.draw(self.screen, self.camera_x, self.camera_y)
-            if self.state != 'combat_state':
+            if not is_in_combat:
                 self.player.draw(self.screen, self.camera_x, self.camera_y)
             
             # Render Camp entities if in camp map grid
@@ -2360,40 +2466,7 @@ class Game:
                     else:
                         self._draw_text("Please wait...", 170, 550, (150, 150, 150))
             
-            # Render Overworld Pause Menu on top if in pause_menu_state
-            if self.state == 'pause_menu_state':
-                # Create a semi-transparent screen-sized rectangle to dim the overworld
-                overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-                overlay.fill((10, 10, 15, 180))
-                self.screen.blit(overlay, (0, 0))
-                
-                # Center panel
-                pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(200, 180, 400, 240))
-                pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(200, 180, 400, 240), 2)
-                
-                # Title
-                self._draw_text("GAME PAUSED", self.width // 2, 210, (238, 206, 112), center=True)
-                pygame.draw.line(self.screen, self.grid_color, (230, 235), (570, 235), 1)
-                
-                # Menu options
-                start_y = 260
-                spacing = 45
-                for i, option in enumerate(self.pause_menu_options):
-                    y = start_y + (i * spacing)
-                    is_selected = (i == self.pause_menu_index)
-                    if is_selected:
-                        color = (30, 144, 255)
-                        text = f"> {option} <"
-                        pygame.draw.rect(self.screen, (40, 40, 50), pygame.Rect(240, y - 12, 320, 28))
-                        pygame.draw.rect(self.screen, (60, 60, 75), pygame.Rect(240, y - 12, 320, 28), 1)
-                    else:
-                        color = (200, 200, 210)
-                        text = option
-                    self._draw_text(text, self.width // 2, y, color, center=True)
-                    
-                # Toast notification
-                if pygame.time.get_ticks() - self.save_confirmed_time < 2000:
-                    self._draw_text("Game Saved Successfully!", self.width // 2, 395, (46, 139, 87), center=True)
+
 
             # Render Party Menu on top if in party_menu_state
             if self.state == 'party_menu_state':
@@ -2422,18 +2495,29 @@ class Game:
                 party_color = (238, 206, 112) if self.menu_selection == 'party' else (150, 150, 150)
                 items_color = (238, 206, 112) if self.menu_selection == 'items' else (150, 150, 150)
                 
-                # Highlight backgrounds
+                # Highlight backgrounds (dimmed if focus is not sidebar)
+                tab_bg = (60, 75, 95) if self.party_menu_focus == 'sidebar' else (45, 55, 70)
                 if self.menu_selection == 'party':
-                    pygame.draw.rect(self.screen, (60, 75, 95), pygame.Rect(canvas_x + 6, canvas_y + 35, 148, 40))
+                    pygame.draw.rect(self.screen, tab_bg, pygame.Rect(canvas_x + 6, canvas_y + 35, 148, 40))
                 elif self.menu_selection == 'items':
-                    pygame.draw.rect(self.screen, (60, 75, 95), pygame.Rect(canvas_x + 6, canvas_y + 85, 148, 40))
+                    pygame.draw.rect(self.screen, tab_bg, pygame.Rect(canvas_x + 6, canvas_y + 85, 148, 40))
                 
                 self._draw_text("Party", canvas_x + 20, canvas_y + 43, party_color)
                 self._draw_text("Items", canvas_x + 20, canvas_y + 93, items_color)
                 
                 # Navigation controls helper text
-                self._draw_small_text("UP/DOWN: Navigate", canvas_x + 12, canvas_y + 340, (170, 170, 170))
-                self._draw_small_text("TAB/ESC: Close", canvas_x + 12, canvas_y + 365, (170, 170, 170))
+                if self.party_menu_focus == 'sidebar':
+                    self._draw_small_text("UP/DOWN: Switch tab", canvas_x + 12, canvas_y + 315, (170, 170, 170))
+                    self._draw_small_text("ENTER/RIGHT: Enter", canvas_x + 12, canvas_y + 340, (170, 170, 170))
+                    self._draw_small_text("TAB/ESC: Close", canvas_x + 12, canvas_y + 365, (170, 170, 170))
+                elif self.party_menu_focus == 'items_list':
+                    self._draw_small_text("UP/DOWN: Select item", canvas_x + 12, canvas_y + 315, (170, 170, 170))
+                    self._draw_small_text("ENTER: Use item", canvas_x + 12, canvas_y + 340, (170, 170, 170))
+                    self._draw_small_text("LEFT/ESC: Back", canvas_x + 12, canvas_y + 365, (170, 170, 170))
+                elif self.party_menu_focus == 'targeting':
+                    self._draw_small_text("UP/DOWN: Select target", canvas_x + 12, canvas_y + 315, (170, 170, 170))
+                    self._draw_small_text("ENTER: Confirm heal", canvas_x + 12, canvas_y + 340, (170, 170, 170))
+                    self._draw_small_text("ESC: Cancel", canvas_x + 12, canvas_y + 365, (170, 170, 170))
                 
                 # Render right column data panel
                 right_x = canvas_x + 180
@@ -2449,7 +2533,8 @@ class Game:
                     pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x, canvas_y + 115, 180, 10))
                     if self.player_max_hp > 0:
                         hp_ratio = max(0.0, min(1.0, self.player_hp / self.player_max_hp))
-                        pygame.draw.rect(self.screen, (30, 144, 255), pygame.Rect(right_x, canvas_y + 115, int(180 * hp_ratio), 10))
+                        bar_color = (0, 255, 0) if getattr(self, 'player_heal_flash_frames', 0) > 0 else (30, 144, 255)
+                        pygame.draw.rect(self.screen, bar_color, pygame.Rect(right_x, canvas_y + 115, int(180 * hp_ratio), 10))
                     
                     # Player EXP
                     self._draw_small_text(f"EXP: {self.player_exp} / {self.exp_to_next_level}", right_x + 210, canvas_y + 95, (200, 200, 200))
@@ -2466,7 +2551,8 @@ class Game:
                         pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(right_x, canvas_y + 210, 180, 10))
                         if self.saif_max_hp > 0:
                             hp_ratio = max(0.0, min(1.0, self.saif_hp / self.saif_max_hp))
-                            pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(right_x, canvas_y + 210, int(180 * hp_ratio), 10))
+                            bar_color = (0, 255, 0) if getattr(self, 'saif_heal_flash_frames', 0) > 0 else (46, 139, 87)
+                            pygame.draw.rect(self.screen, bar_color, pygame.Rect(right_x, canvas_y + 210, int(180 * hp_ratio), 10))
                         
                         # Saif EXP
                         self._draw_small_text(f"EXP: {self.saif_exp} / {self.saif_exp_to_next_level}", right_x + 210, canvas_y + 190, (200, 200, 200))
@@ -2496,14 +2582,19 @@ class Game:
                         self._draw_text("Inventory is empty.", right_x, canvas_y + 70, (150, 150, 150))
                     else:
                         item_y = canvas_y + 65
-                        for item_id, qty in active_items.items():
+                        for idx, (item_id, qty) in enumerate(active_items.items()):
                             item_data = self.data_manager.get_item_data(item_id)
                             item_name = item_data.get("name", item_id) if item_data else item_id
                             item_desc = item_data.get("description", "") if item_data else ""
                             
+                            # Check if selected
+                            is_selected = (idx == self.inventory_index and self.party_menu_focus in ('items_list', 'targeting'))
+                            bg_color = (60, 75, 95) if is_selected else (38, 48, 62)
+                            border_color = (238, 206, 112) if is_selected else (60, 70, 85)
+                            
                             # Draw item card slot
-                            pygame.draw.rect(self.screen, (38, 48, 62), pygame.Rect(right_x, item_y, 400, 55))
-                            pygame.draw.rect(self.screen, (60, 70, 85), pygame.Rect(right_x, item_y, 400, 55), 1)
+                            pygame.draw.rect(self.screen, bg_color, pygame.Rect(right_x, item_y, 400, 55))
+                            pygame.draw.rect(self.screen, border_color, pygame.Rect(right_x, item_y, 400, 55), 1)
                             
                             # Draw name and quantity
                             self._draw_text(item_name, right_x + 15, item_y + 6, (245, 245, 245))
@@ -2514,6 +2605,45 @@ class Game:
                                 self._draw_small_text(item_desc, right_x + 15, item_y + 32, (180, 180, 180))
                                 
                             item_y += 65
+
+                # Render Targeting Window Overlay
+                if self.party_menu_focus == 'targeting':
+                    # Create a small targeting window overlay in the center of the canvas
+                    win_x, win_y = 250, 200
+                    win_w, win_h = 300, 200
+                    
+                    # Dim background behind the targeting window
+                    sub_overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                    sub_overlay.fill((0, 0, 0, 100))
+                    self.screen.blit(sub_overlay, (0, 0))
+                    
+                    # Draw targeting window panel
+                    pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(win_x, win_y, win_w, win_h))
+                    pygame.draw.rect(self.screen, (238, 206, 112), pygame.Rect(win_x, win_y, win_w, win_h), 2)
+                    
+                    # Title
+                    self._draw_text("USE ITEM ON:", win_x + win_w // 2, win_y + 25, (238, 206, 112), center=True)
+                    pygame.draw.line(self.screen, self.grid_color, (win_x + 20, win_y + 55), (win_x + win_w - 20, win_y + 55), 1)
+                    
+                    targets = ['Player']
+                    if self.saif_recruited:
+                        targets.append('Saif')
+                        
+                    for i, target_name in enumerate(targets):
+                        y_pos = win_y + 80 + i * 45
+                        is_selected = (i == self.target_index)
+                        if is_selected:
+                            color = (30, 144, 255)
+                            text = f"> {target_name} <"
+                            pygame.draw.rect(self.screen, (40, 40, 50), pygame.Rect(win_x + 30, y_pos - 10, win_w - 60, 32))
+                            pygame.draw.rect(self.screen, (60, 60, 75), pygame.Rect(win_x + 30, y_pos - 10, win_w - 60, 32), 1)
+                        else:
+                            color = (200, 200, 210)
+                            text = target_name
+                        self._draw_text(text, win_x + win_w // 2, y_pos, color, center=True)
+                    
+                    # Footer help text
+                    self._draw_small_text("ENTER: Confirm | ESC: Cancel", win_x + win_w // 2, win_y + win_h - 25, (150, 150, 150), center=True)
             
         elif self.state == 'settings_state':
             # ── LLM Settings Screen ──────────────────────────────────────
@@ -2678,7 +2808,8 @@ class Game:
             # Subtitle message
             self._draw_text("Please wait while cognitive matrices load.", self.width // 2, 410, (100, 100, 110), center=True)
             
-        if self.state == 'combat_state':
+        is_in_combat = (self.state == 'combat_state' or (self.state == 'pause_menu_state' and getattr(self, 'state_before_pause', None) == 'combat_state'))
+        if is_in_combat:
             # Draw semi-transparent black overlay (Arena Dim) to dim the overworld
             overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 150))
@@ -2949,6 +3080,41 @@ class Game:
                     next_floating_texts.append(ft)
             self.floating_texts = next_floating_texts
         
+        # Render Overworld Pause Menu on top if in pause_menu_state
+        if self.state == 'pause_menu_state':
+            # Create a semi-transparent screen-sized rectangle to dim the overworld
+            overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            overlay.fill((10, 10, 15, 180))
+            self.screen.blit(overlay, (0, 0))
+            
+            # Center panel
+            pygame.draw.rect(self.screen, self.panel_color, pygame.Rect(200, 180, 400, 240))
+            pygame.draw.rect(self.screen, self.grid_color, pygame.Rect(200, 180, 400, 240), 2)
+            
+            # Title
+            self._draw_text("GAME PAUSED", self.width // 2, 210, (238, 206, 112), center=True)
+            pygame.draw.line(self.screen, self.grid_color, (230, 235), (570, 235), 1)
+            
+            # Menu options
+            start_y = 260
+            spacing = 45
+            for i, option in enumerate(self.pause_menu_options):
+                y = start_y + (i * spacing)
+                is_selected = (i == self.pause_menu_index)
+                if is_selected:
+                    color = (30, 144, 255)
+                    text = f"> {option} <"
+                    pygame.draw.rect(self.screen, (40, 40, 50), pygame.Rect(240, y - 12, 320, 28))
+                    pygame.draw.rect(self.screen, (60, 60, 75), pygame.Rect(240, y - 12, 320, 28), 1)
+                else:
+                    color = (200, 200, 210)
+                    text = option
+                self._draw_text(text, self.width // 2, y, color, center=True)
+                
+            # Toast notification
+            if pygame.time.get_ticks() - self.save_confirmed_time < 2000:
+                self._draw_text("Game Saved Successfully!", self.width // 2, 395, (46, 139, 87), center=True)
+
         # Screen Shake VFX: right before display flip, apply random X/Y offset
         if self.screen_shake_frames > 0:
             offset_x = random.randint(-5, 5)

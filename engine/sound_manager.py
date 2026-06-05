@@ -18,7 +18,8 @@ class SoundManager:
         self.sfx_files = {
             "hit": "assets/audio/hit.wav",
             "parry": "assets/audio/parry.wav",
-            "menu_select": "assets/audio/menu_select.wav"
+            "menu_select": "assets/audio/menu_select.wav",
+            "heal": "assets/audio/heal.wav"
         }
         self.bgm_tracks = {
             "overworld": "assets/audio/explore_1.mp3",
@@ -72,6 +73,19 @@ class SoundManager:
                 t = i / sample_rate
                 volume = 0.4 * (1.0 - t / duration)
                 value = int(volume * 32767.0 * (math.sin(2.0 * math.pi * 880.0 * t) + 0.5 * math.sin(2.0 * math.pi * 1320.0 * t)) / 1.5)
+                data.extend(struct.pack('<h', value))
+                
+        elif sfx_type == "heal":
+            # Rising pitch chime/heal sound
+            duration = 0.20
+            frequency_start = 440.0
+            frequency_end = 880.0
+            num_samples = int(sample_rate * duration)
+            for i in range(num_samples):
+                t = i / sample_rate
+                freq = frequency_start + (frequency_end - frequency_start) * (t / duration)
+                volume = 0.35 * (1.0 - t / duration)
+                value = int(volume * 32767.0 * math.sin(2.0 * math.pi * freq * t))
                 data.extend(struct.pack('<h', value))
                 
         elif sfx_type == "menu_select":
