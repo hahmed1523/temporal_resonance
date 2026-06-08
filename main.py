@@ -73,7 +73,7 @@ def reset_game_state():
         "llm_think": llm_think,
         "inventory": {},
         "saif_refusal_queue": [],
-        "current_location": "overworld",
+        "current_location": "test_town",
         "global_flags": {
             "started_desert_quest": True,
             "desert_boss_defeated": False

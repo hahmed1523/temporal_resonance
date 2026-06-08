@@ -16,5 +16,23 @@
     "color": [220, 20, 60],
     "size": 40,
     "loot_drop": "small_potion"
+  },
+  "dungeon_grunt": {
+    "name": "Dungeon Grunt",
+    "max_hp": 40,
+    "base_damage": 8,
+    "exp_yield": 30,
+    "color": [0, 191, 255],
+    "size": 40,
+    "loot_drop": "small_potion"
+  },
+  "dungeon_boss": {
+    "name": "Dungeon Boss",
+    "max_hp": 150,
+    "base_damage": 25,
+    "exp_yield": 200,
+    "color": [255, 69, 0],
+    "size": 50,
+    "loot_drop": "iron_scrap"
   }
 }

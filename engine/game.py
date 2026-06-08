@@ -13,6 +13,7 @@ from engine.quest_manager import QuestManager
 
 from engine.llm_handler import generate_llm_response, save_api_key_to_env, fetch_refusal_dialogue, prewarm_llm
 from engine.level_maps import DEFAULT_MAP_GRID, TILE_SIZE, CAMP_MAP_GRID
+from engine.state_manager import GameState, GameStateManager
 
 
 class Game:
@@ -47,20 +48,8 @@ class Game:
         
         # Load level map grids from DataManager
         self.data_manager = data_manager
-        overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
-        camp_data = self.data_manager.get_map_data("camp") if self.data_manager else None
-        
-        if overworld_data:
-            self.overworld_map_grid = [list(row) for row in overworld_data["grid"]]
-        else:
-            self.overworld_map_grid = DEFAULT_MAP_GRID
-            
-        if camp_data:
-            self.camp_map_grid = [list(row) for row in camp_data["grid"]]
-        else:
-            self.camp_map_grid = CAMP_MAP_GRID
-            
-        self.map_grid = self.overworld_map_grid
+        self.current_map_id = "test_town"
+        self.map_grid = DEFAULT_MAP_GRID
         
         # Game loop control and clock
         self.clock = pygame.time.Clock()
@@ -140,57 +129,33 @@ class Game:
         self.save_confirmed_time = 0
         self.no_save_message_time = 0
         
-        # World map boundaries (grid is 50 rows × 50 cols, each tile is 40×40 px)
+        # World map boundaries (will be properly set by map loader)
         self.tile_size = TILE_SIZE
-        self.world_width = len(self.map_grid[0]) * self.tile_size
-        self.world_height = len(self.map_grid) * self.tile_size
+        self.world_width = 800
+        self.world_height = 600
         
         # Camera Offset coordinates
         self.camera_x = 0.0
         self.camera_y = 0.0
         
-        # Load Game State (which sets up self.enemy based on loaded flag settings)
+        # Initialize Player at default (will be moved by map loader)
+        self.player = Player(0, 0)
+        self.active_enemies = []
+        self.enemy = None
+        self.current_combat_enemy = None
+        self.is_boss_fight = False
+        
+        # Initialize GameStateManager
+        self.game_state_manager = GameStateManager(GameState.TOWN)
+        
+        # Load Game State (which sets up self.current_location based on loaded flag settings)
         self._load_game_state()
         
-        # Initialize Game Entities from maps.json / enemies.json
-        overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
+        # Sync current_map_id to loaded location
+        self.current_map_id = self.current_location
         
-        player_x = 960
-        player_y = 1040
-        if overworld_data and "player_spawn" in overworld_data:
-            player_x = overworld_data["player_spawn"][0] * self.tile_size
-            player_y = overworld_data["player_spawn"][1] * self.tile_size
-            
-        self.player = Player(player_x, player_y)
-        
-        # Golden Chest — position derived from grid scan below
-        self.chest = None
-        
-        # Scan grid to find Saif NPC tile 3
-        self.saif_npc_x = None
-        self.saif_npc_y = None
-        for r_idx, row in enumerate(self.map_grid):
-            for c_idx, cell in enumerate(row):
-                if cell == 3:
-                    self.saif_npc_x = c_idx * self.tile_size
-                    self.saif_npc_y = r_idx * self.tile_size
-                    break
-            if self.saif_npc_x is not None:
-                break
-                    
-        # Scan grid to find Chest tile 2 and create Chest entity at that position
-        self.chest_x = None
-        self.chest_y = None
-        for r_idx, row in enumerate(self.map_grid):
-            for c_idx, cell in enumerate(row):
-                if cell == 2:
-                    self.chest_x = c_idx * self.tile_size
-                    self.chest_y = r_idx * self.tile_size
-                    break
-            if self.chest_x is not None:
-                break
-        if self.chest_x is not None:
-            self.chest = Chest(self.chest_x, self.chest_y)
+        # Load the active map data dynamically (sets grid, boundaries, spawn point, active_enemies)
+        self._load_active_map_data()
         
         # Trigger initial camera centering
         self._update_camera()
@@ -271,28 +236,9 @@ class Game:
 
     def _setup_enemy(self):
         """
-        Sets up the overworld enemy based on map configurations.
+        Placeholder - enemies are loaded dynamically in _load_active_map_data.
         """
-        overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
-        enemy_x = 1120
-        enemy_y = 1040
-        enemy_color = (220, 20, 60)
-        enemy_size = 40
-        self.enemy_type = "desert_bandit"
-        
-        if overworld_data and overworld_data.get("enemy_spawns"):
-            first_enemy = overworld_data["enemy_spawns"][0]
-            self.enemy_type = first_enemy["type"]
-            enemy_grid_pos = first_enemy["pos"]
-            enemy_x = enemy_grid_pos[0] * self.tile_size
-            enemy_y = enemy_grid_pos[1] * self.tile_size
-            
-            if self.data_manager:
-                enemy_info = self.data_manager.get_enemy_data(self.enemy_type)
-                enemy_color = tuple(enemy_info.get("color", [220, 20, 60]))
-                enemy_size = enemy_info.get("size", 40)
-                
-        self.enemy = Enemy(enemy_x, enemy_y, size=enemy_size, color=enemy_color)
+        pass
 
     def _adjust_respect(self, change: int):
         """
@@ -347,6 +293,7 @@ class Game:
         self.saif_flash_frames = 0
         self.player_recoil_frames = 0
         self.saif_recoil_frames = 0
+        self.enemy_recoil_frames = 0
         
         self.is_combat_ending = False
         self.enemy_defeated_and_removed = False
@@ -418,6 +365,7 @@ class Game:
 
         if is_combo:
             self.enemy_flash_frames = 15
+            self.enemy_recoil_frames = 15
             self.screen_shake_frames = 20
             self.floating_texts.append({
                 "text": f"-{damage} COMBO!",
@@ -428,6 +376,7 @@ class Game:
             print(f"[Combat] Combo executed! Damage: {damage}. Enemy HP: {self.enemy_hp}")
         else:
             self.enemy_flash_frames = 5
+            self.enemy_recoil_frames = 15
             self.screen_shake_frames = 10
             self.floating_texts.append({
                 "text": f"-{damage}",
@@ -536,11 +485,20 @@ class Game:
 
     def _end_battle_victory(self):
         """
-        Ends the battle in victory, transitions back to overworld, and knocks back player.
+        Ends the battle in victory, transitions back to active map, and knocks back player.
         """
         print("Battle Over! Victory achieved.")
         self._reset_combat_only_state()
-        self.current_location = "overworld"
+        self.current_location = self.current_map_id
+        
+        if self.current_map_id == "test_town":
+            target_state = GameState.TOWN
+        elif self.current_map_id == "test_dungeon":
+            target_state = GameState.DUNGEON
+        else:
+            target_state = GameState.OVERWORLD
+            
+        self.game_state_manager.set_state(target_state)
         self.state = 'exploration_state'
         self._knockback_player()
 
@@ -786,7 +744,7 @@ class Game:
                     self.llm_think = data.get("llm_think", self.llm_think)
                     self.inventory = data.get("inventory", self.inventory)
                     self.saif_refusal_queue = data.get("saif_refusal_queue", [])[:3]
-                    self.current_location = data.get("current_location", "overworld")
+                    self.current_location = data.get("current_location", "test_town")
                     self.global_flags = data.get("global_flags", {})
                     # Ensure default flags are present
                     if "started_desert_quest" not in self.global_flags:
@@ -796,11 +754,9 @@ class Game:
                     
                     # Load enemy state based on boss defeated flag
                     if self.global_flags.get("desert_boss_defeated"):
-                        self.enemy = None
                         self.enemy_defeated_and_removed = True
                     else:
                         self.enemy_defeated_and_removed = False
-                        self._setup_enemy()
             except Exception as e:
                 print(f"[Error] Failed to load JSON state: {e}. Resetting defaults.")
                 self._reset_state_to_default()
@@ -831,10 +787,9 @@ class Game:
         self.chat_history = []
         self.inventory = {}
         self.saif_refusal_queue = []
-        self.current_location = "overworld"
+        self.current_location = "test_town"
         self.global_flags = {"started_desert_quest": True, "desert_boss_defeated": False}
         self.enemy_defeated_and_removed = False
-        self._setup_enemy()
         
         # Load and preserve config keys from file if it exists
         if os.path.exists(self.state_file_path):
@@ -852,6 +807,191 @@ class Game:
                 pass
                 
         self._save_game_state()
+
+    def _load_active_map_data(self, spawn_coords=None):
+        """
+        Loads the map layout, spawn point, active enemies, and boundaries for self.current_map_id.
+        """
+        map_data = self.data_manager.get_map_data(self.current_map_id) if self.data_manager else None
+        
+        if map_data:
+            self.map_grid = [list(row) for row in map_data["grid"]]
+            self.map_name = map_data.get("name", "Unknown Area")
+            
+            # 1. Update world boundaries
+            self.world_width = len(self.map_grid[0]) * self.tile_size
+            self.world_height = len(self.map_grid) * self.tile_size
+            
+            # 2. Position the player (either from spawn_coords or maps.json player_spawn)
+            if spawn_coords:
+                self.player.x = spawn_coords[0] * self.tile_size
+                self.player.y = spawn_coords[1] * self.tile_size
+            elif "player_spawn" in map_data:
+                self.player.x = map_data["player_spawn"][0] * self.tile_size
+                self.player.y = map_data["player_spawn"][1] * self.tile_size
+            else:
+                self.player.x = 2 * self.tile_size
+                self.player.y = 2 * self.tile_size
+                
+            # 3. Instantiate dynamic map enemies
+            self.active_enemies = []
+            if "enemy_spawns" in map_data:
+                for spawn in map_data["enemy_spawns"]:
+                    enemy_type = spawn["type"]
+                    enemy_pos = spawn["pos"]
+                    enemy_info = self.data_manager.get_enemy_data(enemy_type)
+                    
+                    enemy_color = tuple(enemy_info.get("color", [220, 20, 60]))
+                    enemy_size = enemy_info.get("size", 40)
+                    vx = spawn.get("vx", 0.0) * self.tile_size
+                    vy = spawn.get("vy", 0.0) * self.tile_size
+                    is_boss = spawn.get("is_boss", False)
+                    max_hp = enemy_info.get("max_hp", 100)
+                    base_damage = enemy_info.get("base_damage", 20)
+                    
+                    enemy = Enemy(
+                        enemy_pos[0] * self.tile_size,
+                        enemy_pos[1] * self.tile_size,
+                        size=enemy_size,
+                        color=enemy_color,
+                        vx=vx,
+                        vy=vy,
+                        is_boss=is_boss,
+                        enemy_type=enemy_type,
+                        max_hp=max_hp,
+                        base_damage=base_damage
+                    )
+                    self.active_enemies.append(enemy)
+                    
+            # 4. Scan grid to find Chest tile 2 and Saif tile 3 if they exist
+            self.chest_x = None
+            self.chest_y = None
+            self.saif_npc_x = None
+            self.saif_npc_y = None
+            self.chest = None
+            
+            for r_idx, row in enumerate(self.map_grid):
+                for c_idx, cell in enumerate(row):
+                    if cell == 2:
+                        self.chest_x = c_idx * self.tile_size
+                        self.chest_y = r_idx * self.tile_size
+                        self.chest = Chest(self.chest_x, self.chest_y)
+                    elif cell == 3:
+                        self.saif_npc_x = c_idx * self.tile_size
+                        self.saif_npc_y = r_idx * self.tile_size
+                        
+            print(f"[Engine] Map '{self.current_map_id}' loaded successfully. Enemies: {len(self.active_enemies)}")
+        else:
+            print(f"[Error] Failed to load map data for: {self.current_map_id}")
+            self.map_grid = DEFAULT_MAP_GRID
+            self.world_width = len(self.map_grid[0]) * self.tile_size
+            self.world_height = len(self.map_grid) * self.tile_size
+            self.active_enemies = []
+            
+    def _execute_map_transition(self, trans):
+        """
+        Executes a map transition to target map and state defined in configuration.
+        """
+        target_state_name = trans.get("target_state")
+        target_map = trans.get("target_map")
+        target_spawn = trans.get("target_spawn")
+        
+        try:
+            target_state = GameState[target_state_name]
+        except KeyError:
+            print(f"[Warning] Invalid target state: {target_state_name}")
+            return
+            
+        print(f"[Engine] Triggering transition to map: {target_map}")
+        
+        # Load new map
+        self.current_map_id = target_map
+        self._load_active_map_data(spawn_coords=target_spawn)
+        
+        # Set state
+        self.game_state_manager.set_state(target_state)
+        
+        self.current_location = target_map
+        self._update_camera()
+        self._save_game_state()
+
+    def _trigger_combat_state(self, enemy):
+        """
+        Triggers combat state, transitions from current map to combat screen,
+        and flags if this is a boss battle.
+        """
+        self.current_combat_enemy = enemy
+        self.enemy = enemy  # backward compatible
+        self.enemy_type = enemy.enemy_type if hasattr(enemy, 'enemy_type') else "goblin_grunt"
+        self.is_boss_fight = enemy.is_boss
+        
+        # Centralized state transition
+        self.game_state_manager.set_state(GameState.COMBAT)
+        
+        self.state = 'combat_state'
+        self.current_location = 'combat'
+        self.combat_mode = 'menu'
+        self.combat_turn = 'player'
+        self.menu_index = 0
+        
+        if self.saif_recruited:
+            self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
+        else:
+            self.menu_options = ['Attack', 'Item', 'Flee']
+            
+        start_player_x = self.player.x - self.camera_x
+        start_player_y = self.player.y - self.camera_y
+        start_enemy_x = enemy.x - self.camera_x
+        start_enemy_y = enemy.y - self.camera_y
+        
+        self.player_original_screen_pos = (start_player_x, start_player_y)
+        self.clash_start_player_pos = (start_player_x, start_player_y)
+        self.clash_start_enemy_pos = (start_enemy_x, start_enemy_y)
+        self.clash_start_saif_pos = (start_player_x, start_player_y + 80)
+        
+        self.player_combat_pos = (int(0.25 * self.width), 150)
+        self.enemy_combat_start_pos = (int(0.75 * self.width), 190)
+        self.saif_combat_pos = (int(0.25 * self.width), 230)
+        
+        self.player_combat_current_pos = [start_player_x, start_player_y]
+        self.enemy_combat_current_pos = [start_enemy_x, start_enemy_y]
+        self.saif_combat_current_pos = [start_player_x, start_player_y + 80]
+        
+        self.enemy_hp = enemy.max_hp if hasattr(enemy, 'max_hp') else (150 if enemy.is_boss else 100)
+        self.enemy_max_hp = self.enemy_hp
+        
+        self.is_sliding = True
+        self.combat_ui_offset = 200.0
+        self.combat_clash_active = True
+        self.combat_clash_start_time = pygame.time.get_ticks()
+        self.combat_clash_hit_triggered = False
+        self.player_attack_active = False
+        self.saif_attack_active = False
+        self.player_damage_dealt = False
+        self.saif_damage_dealt = False
+        self.is_combo_attack = False
+        self.combo_damage_applied = False
+        self.enemy_damage_dealt = False
+        self.combo_cooldown = 0
+        self.saif_defending = False
+        self.saif_excuse_active = False
+        self.saif_excuse_text = ""
+        self.saif_excuse_load_time = None
+        
+        self.floating_texts = []
+        self.screen_shake_frames = 0
+        self.enemy_flash_frames = 0
+        self.player_flash_frames = 0
+        self.saif_flash_frames = 0
+        self.player_recoil_frames = 0
+        self.saif_recoil_frames = 0
+        self.enemy_recoil_frames = 0
+        
+        self._trigger_refusal_queue_refill()
+        self._update_bgm()
+        
+        boss_str = " (BOSS FIGHT)" if self.is_boss_fight else ""
+        print(f"[Combat] Battle initiated with {enemy.color}{boss_str}! Enemy HP: {self.enemy_hp}.")
 
     def _save_game_state(self):
         """
@@ -975,13 +1115,27 @@ class Game:
                     self.player.y = data.get("player_y", 1040)
                     self.camera_x = data.get("camera_x", 0.0)
                     self.camera_y = data.get("camera_y", 0.0)
-                    self.current_location = data.get("current_location", "overworld")
+                    self.current_location = data.get("current_location", "test_town")
                     self.global_flags = data.get("global_flags", {})
                     # Ensure default flags are present
                     if "started_desert_quest" not in self.global_flags:
                         self.global_flags["started_desert_quest"] = True
                     if "desert_boss_defeated" not in self.global_flags:
                         self.global_flags["desert_boss_defeated"] = False
+                    
+                    # Sync active map and game states dynamically
+                    self.current_map_id = self.current_location
+                    self._load_active_map_data()
+                    
+                    if self.current_map_id == "test_town":
+                        target_state = GameState.TOWN
+                    elif self.current_map_id == "test_dungeon":
+                        target_state = GameState.DUNGEON
+                    elif self.current_map_id == "camp":
+                        target_state = GameState.CAMP
+                    else:
+                        target_state = GameState.OVERWORLD
+                    self.game_state_manager.set_state(target_state)
                 
                 # Align map grid tiles
                 if self.chest_opened and self.chest_x is not None:
@@ -1044,33 +1198,33 @@ class Game:
         self._save_game_state()
 
     def _transition_to_camp(self):
-        """Saves overworld state and transitions player into the 2D Camp Map."""
+        """Saves active map state and transitions player into the Camp Map."""
         self.overworld_player_x = self.player.x
         self.overworld_player_y = self.player.y
         self.overworld_camera_x = self.camera_x
         self.overworld_camera_y = self.camera_y
+        self.overworld_map_id = self.current_map_id
         
-        # Switch map representation to Camp Map (50x50)
-        self.map_grid = self.camp_map_grid
+        # Switch map representation to Camp Map
+        self.current_map_id = "camp"
+        self._load_active_map_data(spawn_coords=[24, 29])
         
         # Reset rest notification flag
         self.rest_notification_active = False
         self.elena_dialogue_active = False
         self.active_camp_npc = None
         
-        # Spawn player below the campfire facing it
-        self.player.x = 960
-        self.player.y = 1160
-        
         # Recalculate camera centering for campsite
         self._update_camera()
         self.current_location = "camp"
+        self.game_state_manager.set_state(GameState.CAMP)
         self.state = 'camp_state'
         print("[System] Transitioned to large campsite map.")
 
     def _transition_to_overworld(self):
-        """Restores player position and camera and transitions back to Overworld."""
-        self.map_grid = self.overworld_map_grid
+        """Restores player position and camera and transitions back to Overworld/Town/Dungeon."""
+        self.current_map_id = getattr(self, 'overworld_map_id', 'test_overworld')
+        self._load_active_map_data()
         
         # Restore coordinates and camera offset
         self.player.x = self.overworld_player_x
@@ -1078,9 +1232,18 @@ class Game:
         self.camera_x = self.overworld_camera_x
         self.camera_y = self.overworld_camera_y
         
-        self.current_location = "overworld"
+        # Determine target state based on map ID
+        if self.current_map_id == "test_town":
+            target_state = GameState.TOWN
+        elif self.current_map_id == "test_dungeon":
+            target_state = GameState.DUNGEON
+        else:
+            target_state = GameState.OVERWORLD
+            
+        self.current_location = self.current_map_id
+        self.game_state_manager.set_state(target_state)
         self.state = 'exploration_state'
-        print("[System] Returned to overworld.")
+        print(f"[System] Returned to map: {self.current_map_id}.")
 
     def _update_bgm(self):
         """
@@ -1372,24 +1535,12 @@ class Game:
                 reset_game_state() # Overwrites game_state.json with defaults
                 self._load_game_state() # Load defaults in memory
                 
-                # Reset map grid copies from DataManager templates
-                overworld_data = self.data_manager.get_map_data("overworld") if self.data_manager else None
-                camp_data = self.data_manager.get_map_data("camp") if self.data_manager else None
-                if overworld_data:
-                    self.overworld_map_grid = [list(row) for row in overworld_data["grid"]]
-                if camp_data:
-                    self.camp_map_grid = [list(row) for row in camp_data["grid"]]
-                self.map_grid = self.overworld_map_grid
+                # Load active map Test Town dynamically
+                self.current_map_id = "test_town"
+                self.current_location = "test_town"
+                self._load_active_map_data()
                 
-                self.current_location = "overworld"
-                
-                # Reset starting positions from DataManager Atlas
-                player_x = 960
-                player_y = 1040
-                if overworld_data and "player_spawn" in overworld_data:
-                    player_x = overworld_data["player_spawn"][0] * self.tile_size
-                    player_y = overworld_data["player_spawn"][1] * self.tile_size
-                self.player.x, self.player.y = player_x, player_y
+                self.game_state_manager.set_state(GameState.TOWN)
                 
                 self.enemy_hp = 100
                 self.player_hp = self.player_max_hp
@@ -1799,73 +1950,41 @@ class Game:
             # Update player movement
             self.player.handle_input(keys, dt, self.world_width, self.world_height, self.map_grid, saif_rec_check)
             
+            # Update all active enemies
+            for enemy in self.active_enemies:
+                enemy.update(dt, self.map_grid, self.tile_size)
+            
             # Check collision with overworld enemy only in exploration state
             if self.state == 'exploration_state':
-                if self.enemy and not self.enemy_defeated_and_removed and self.player.get_collision_rect().colliderect(self.enemy.get_rect()):
-                    self.state = 'combat_state'
-                    self.current_location = 'combat'
-                    self.combat_mode = 'menu'
-                    self.combat_turn = 'player'
-                    self.menu_index = 0
-                    if self.saif_recruited:
-                        self.menu_options = ['Attack', 'Special', 'Talk', 'Item', 'Flee']
-                    else:
-                        self.menu_options = ['Attack', 'Item', 'Flee']
-                    
-                    # Set starting coordinates at their overworld positions
-                    start_player_x = self.player.x - self.camera_x
-                    start_player_y = self.player.y - self.camera_y
-                    start_enemy_x = self.enemy.x - self.camera_x
-                    start_enemy_y = self.enemy.y - self.camera_y
-                    
-                    self.player_original_screen_pos = (start_player_x, start_player_y)
-                    self.clash_start_player_pos = (start_player_x, start_player_y)
-                    self.clash_start_enemy_pos = (start_enemy_x, start_enemy_y)
-                    self.clash_start_saif_pos = (start_player_x, start_player_y + 80)
-                    
-                    # Target 'Battle Formation' coordinates (ease-out targets)
-                    self.player_combat_pos = (int(0.25 * self.width), 150)
-                    self.enemy_combat_start_pos = (int(0.75 * self.width), 190)
-                    self.saif_combat_pos = (int(0.25 * self.width), 230)
-                    
-                    # Initialize starting positions
-                    self.player_combat_current_pos = [start_player_x, start_player_y]
-                    self.enemy_combat_current_pos = [start_enemy_x, start_enemy_y]
-                    self.saif_combat_current_pos = [start_player_x, start_player_y + 80]
-                    
-                    self.is_sliding = True
-                    self.combat_ui_offset = 200.0
-                    self.combat_clash_active = True
-                    self.combat_clash_start_time = pygame.time.get_ticks()
-                    self.combat_clash_hit_triggered = False
-                    self.player_attack_active = False
-                    self.saif_attack_active = False
-                    self.player_damage_dealt = False
-                    self.saif_damage_dealt = False
-                    self.is_combo_attack = False
-                    self.combo_damage_applied = False
-                    self.enemy_damage_dealt = False
-                    self.combo_cooldown = 0
-                    self.saif_defending = False
-                    self.saif_excuse_active = False
-                    self.saif_excuse_text = ""
-                    self.saif_excuse_load_time = None
-                    
-                    # Clear VFX State
-                    self.floating_texts = []
-                    self.screen_shake_frames = 0
-                    self.enemy_flash_frames = 0
-                    self.player_flash_frames = 0
-                    self.saif_flash_frames = 0
-                    self.player_recoil_frames = 0
-                    self.saif_recoil_frames = 0
-                    
-                    # Trigger background refill thread immediately!
-                    self._trigger_refusal_queue_refill()
-                    
-                    # Start playing the battle music!
-                    self._update_bgm()
-                    print("Combat Collision! Instantly transitioned to Battle State...")
+                # Check collision with active map enemies
+                for enemy in self.active_enemies:
+                    if not self.enemy_defeated_and_removed and self.player.get_collision_rect().colliderect(enemy.get_rect()):
+                        self._trigger_combat_state(enemy)
+                        break
+                        
+                # Check if player reaches end coordinates in dungeon
+                if self.current_map_id == "test_dungeon":
+                    player_grid_x = int((self.player.x + self.player.size // 2) // self.tile_size)
+                    player_grid_y = int((self.player.y + self.player.size // 2) // self.tile_size)
+                    map_data = self.data_manager.get_map_data("test_dungeon") if self.data_manager else None
+                    end_coords = map_data.get("end_coordinates", [13, 13]) if map_data else [13, 13]
+                    if player_grid_x == end_coords[0] and player_grid_y == end_coords[1] and not self.enemy_defeated_and_removed:
+                        # Spawn a temporary boss enemy to trigger boss fight
+                        boss_enemy = Enemy(self.player.x, self.player.y, size=50, color=(255, 69, 0), is_boss=True)
+                        self._trigger_combat_state(boss_enemy)
+                        
+                # Check tile-collision map transition triggers
+                player_col = int((self.player.x + self.player.size // 2) // self.tile_size)
+                player_row = int((self.player.y + self.player.size // 2) // self.tile_size)
+                
+                if 0 <= player_row < len(self.map_grid) and 0 <= player_col < len(self.map_grid[0]):
+                    tile_value = self.map_grid[player_row][player_col]
+                    map_data = self.data_manager.get_map_data(self.current_map_id) if self.data_manager else None
+                    if map_data and "transitions" in map_data:
+                        for trans in map_data["transitions"]:
+                            if trans.get("tile_value") == tile_value:
+                                self._execute_map_transition(trans)
+                                break
                 
             # Keep camera centered on player
             self._update_camera()
@@ -1875,7 +1994,11 @@ class Game:
             self.load_progress += 45.0 * dt
             # If pre-warming is not complete yet, pause at 95%
             if self.load_progress >= 95.0 and not self.prewarm_complete:
-                self.load_progress = 95.0
+                if self.prewarm_thread and self.prewarm_thread.is_alive():
+                    print("[LLM System] Pre-warm thread is active/pending. Resolving instantly using fallback text strings to prevent engine hangs.")
+                    self.prewarm_complete = True
+                else:
+                    self.load_progress = 95.0
             
             # Let it run to 100% once pre-warming is complete
             if self.prewarm_complete and self.load_progress >= 95.0:
@@ -1924,14 +2047,25 @@ class Game:
                     
                     self.is_combat_ending = False
                     self.state = 'exploration_state'
-                    self.current_location = 'overworld'
+                    self.current_location = self.current_map_id
                     
-                    # Snap player to overworld grid
+                    if self.current_map_id == "test_town":
+                        target_state = GameState.TOWN
+                    elif self.current_map_id == "test_dungeon":
+                        target_state = GameState.DUNGEON
+                    else:
+                        target_state = GameState.OVERWORLD
+                    self.game_state_manager.set_state(target_state)
+                    
+                    # Snap player to grid
                     self.player.x = round(self.player.x / self.tile_size) * self.tile_size
                     self.player.y = round(self.player.y / self.tile_size) * self.tile_size
                     
                     if self.combat_ending_type == 'victory':
-                        self.enemy = None  # Remove from entity list
+                        if hasattr(self, 'current_combat_enemy') and self.current_combat_enemy in self.active_enemies:
+                            self.active_enemies.remove(self.current_combat_enemy)
+                        self.enemy = None
+                        self.current_combat_enemy = None
                         self._reset_combat_only_state()
                     else:  # Flee
                         self._knockback_player()
@@ -2060,18 +2194,19 @@ class Game:
                             if not self.parry_attempted:
                                 print("Player took damage!")
                             self.sound_manager.play_sfx("hit")
-                            self.player_hp = max(0, self.player_hp - 20)
+                            damage = self.enemy.base_damage if hasattr(self.enemy, 'base_damage') else 20
+                            self.player_hp = max(0, self.player_hp - damage)
                             self._save_game_state()
                             # Spawn player damage floating text
                             self.floating_texts.append({
-                                "text": "-20",
+                                "text": f"-{damage}",
                                 "x": self.player_combat_pos[0] + self.player.size // 2,
                                 "y": self.player_combat_pos[1],
                                 "timer": 45
                             })
                             # Trigger VFX
-                            self.player_flash_frames = 5
-                            self.player_recoil_frames = 6
+                            self.player_flash_frames = 10
+                            self.player_recoil_frames = 15
                             self.screen_shake_frames = 10
                         else:
                             # Play parry SFX!
@@ -2088,7 +2223,8 @@ class Game:
                         # Saif was targeted: parry is skipped
                         print("Saif took damage!")
                         self.sound_manager.play_sfx("hit")
-                        damage = 10 if self.saif_defending else 20
+                        base_dmg = self.enemy.base_damage if hasattr(self.enemy, 'base_damage') else 20
+                        damage = max(1, base_dmg // 2) if self.saif_defending else base_dmg
                         self.saif_hp = max(0, self.saif_hp - damage)
                         self._save_game_state()
                         # Spawn Saif damage floating text
@@ -2099,8 +2235,8 @@ class Game:
                             "timer": 45
                         })
                         # Trigger VFX
-                        self.saif_flash_frames = 5
-                        self.saif_recoil_frames = 6
+                        self.saif_flash_frames = 10
+                        self.saif_recoil_frames = 15
                         self.screen_shake_frames = 10
 
                 
@@ -2308,21 +2444,58 @@ class Game:
                             screen_y = r_idx * tile_size - self.camera_y
                             camp_rect = pygame.Rect(screen_x, screen_y, tile_size, tile_size)
                             pygame.draw.rect(self.screen, (255, 140, 0), camp_rect)
+                        elif cell in (5, 6, 7, 8):
+                            screen_x = c_idx * tile_size - self.camera_x
+                            screen_y = r_idx * tile_size - self.camera_y
+                            portal_rect = pygame.Rect(screen_x, screen_y, tile_size, tile_size)
+                            
+                            # Determine color and text based on transition value
+                            if cell == 5:
+                                color = (238, 206, 112) # Gold
+                                text = "OW"
+                            elif cell == 6:
+                                color = (46, 139, 87)   # Green
+                                text = "TOWN"
+                            elif cell == 7:
+                                color = (220, 20, 60)   # Red
+                                text = "DNGN"
+                            elif cell == 8:
+                                color = (30, 144, 255)  # Blue
+                                text = "OW"
+                            else:
+                                color = (150, 150, 150)
+                                text = "EXIT"
+                                
+                            pygame.draw.rect(self.screen, (24, 24, 28), portal_rect)
+                            pygame.draw.rect(self.screen, color, portal_rect, 2)
+                            self._draw_small_text(text, screen_x + tile_size // 2, screen_y + tile_size // 2, color, center=True)
                             
             # Draw a modern, subtle grid relative to camera offsets for smooth shifting movement
             self._draw_prototype_grid()
             
-            # Render Saif NPC on overworld if not recruited (only in overworld!)
-            if self.map_grid != self.camp_map_grid and not self.saif_recruited and self.saif_npc_x is not None:
+            # Sleek top-left verification indicator
+            self._draw_small_text(f"[Engine] State: {self.game_state_manager.current_state.name} | Map: {self.map_name}", 20, 20, (238, 206, 112))
+            
+            # Render Saif NPC on overworld/town if not recruited
+            if self.current_map_id != "camp" and not self.saif_recruited and self.saif_npc_x is not None:
                 screen_x = self.saif_npc_x - self.camera_x
                 screen_y = self.saif_npc_y - self.camera_y
                 pygame.draw.rect(self.screen, (46, 139, 87), pygame.Rect(screen_x, screen_y, self.tile_size, self.tile_size))
+                self._draw_small_text("SAIF", screen_x + self.tile_size // 2, screen_y + self.tile_size // 2, (255, 255, 255), center=True)
+                
+                # Check adjacency to Saif NPC in world space
+                dist_x = abs(self.player.x - self.saif_npc_x)
+                dist_y = abs(self.player.y - self.saif_npc_y)
+                if dist_x <= 45 and dist_y <= 45:
+                    self._draw_text("Press E to talk to Saif", self.width // 2, 80, (238, 206, 112), center=True)
             
-            # Render game entities with camera offsets (only in overworld!)
+            # Render game entities with camera offsets
             is_in_combat = (self.state == 'combat_state' or (self.state == 'pause_menu_state' and getattr(self, 'state_before_pause', None) == 'combat_state'))
-            if self.map_grid != self.camp_map_grid:
-                if not is_in_combat and self.enemy and not self.enemy_defeated_and_removed:
-                    self.enemy.draw(self.screen, self.camera_x, self.camera_y)
+            if self.current_map_id != "camp":
+                if not is_in_combat:
+                    # Draw all active map enemies
+                    for enemy in self.active_enemies:
+                        enemy.draw(self.screen, self.camera_x, self.camera_y)
                 if self.chest_x is not None:
                     c_idx = int(self.chest_x // self.tile_size)
                     r_idx = int(self.chest_y // self.tile_size)
@@ -2332,7 +2505,7 @@ class Game:
                 self.player.draw(self.screen, self.camera_x, self.camera_y)
             
             # Render Camp entities if in camp map grid
-            if self.map_grid == self.camp_map_grid:
+            if self.current_map_id == "camp":
                 # 1. Flickering Campfire at self.campfire_pos (960, 1040)
                 screen_x = self.campfire_pos[0] - self.camera_x
                 screen_y = self.campfire_pos[1] - self.camera_y
@@ -2816,9 +2989,10 @@ class Game:
             self.screen.blit(overlay, (0, 0))
 
             # 1. Draw Player (blue) and Enemy (red) and Saif (green, if recruited) in their combat layouts
-            # Player (Dodger Blue) animated on the left (with recoil offset if hit)
-            player_x_offset = -8 if self.player_recoil_frames > 0 else 0
+            # Calculate recoil offsets using dynamic decay from max 15 frames for smoother visual motion
+            player_x_offset = 0
             if self.player_recoil_frames > 0:
+                player_x_offset = -int(25 * (self.player_recoil_frames / 15.0))
                 self.player_recoil_frames -= 1
                 
             player_rect = pygame.Rect(int(self.player_combat_current_pos[0]) + player_x_offset, int(self.player_combat_current_pos[1]), self.player.size, self.player.size)
@@ -2830,8 +3004,9 @@ class Game:
             
             # Saif (Sea Green) animated on the left next to player (only if recruited)
             if self.saif_recruited:
-                saif_x_offset = -8 if self.saif_recoil_frames > 0 else 0
+                saif_x_offset = 0
                 if self.saif_recoil_frames > 0:
+                    saif_x_offset = -int(25 * (self.saif_recoil_frames / 15.0))
                     self.saif_recoil_frames -= 1
                     
                 saif_rect = pygame.Rect(int(self.saif_combat_current_pos[0]) + saif_x_offset, int(self.saif_combat_current_pos[1]), self.player.size, self.player.size)
@@ -2843,7 +3018,12 @@ class Game:
             
             # Enemy (Crimson Red or White Flash) animated/static on the right (hidden when defeated/removed)
             if self.enemy and not self.enemy_defeated_and_removed:
-                enemy_rect = pygame.Rect(int(self.enemy_combat_current_pos[0]), int(self.enemy_combat_current_pos[1]), self.enemy.size, self.enemy.size)
+                enemy_x_offset = 0
+                if self.enemy_recoil_frames > 0:
+                    enemy_x_offset = int(25 * (self.enemy_recoil_frames / 15.0))
+                    self.enemy_recoil_frames -= 1
+                    
+                enemy_rect = pygame.Rect(int(self.enemy_combat_current_pos[0]) + enemy_x_offset, int(self.enemy_combat_current_pos[1]), self.enemy.size, self.enemy.size)
                 if self.enemy_flash_frames > 0:
                     pygame.draw.rect(self.screen, (255, 255, 255), enemy_rect)
                     self.enemy_flash_frames -= 1
@@ -2853,9 +3033,11 @@ class Game:
                 # Draw floating Enemy HP above the square in upper arena
                 enemy_x = int(self.enemy_combat_current_pos[0])
                 enemy_y = int(self.enemy_combat_current_pos[1])
-                self._draw_text(f"HP: {self.enemy_hp}/100", enemy_x - 10, enemy_y - 40, self.enemy.color)
+                max_hp = self.enemy_max_hp if hasattr(self, 'enemy_max_hp') else (150 if self.is_boss_fight else 100)
+                self._draw_text(f"HP: {self.enemy_hp}/{max_hp}", enemy_x - 10, enemy_y - 40, self.enemy.color)
                 pygame.draw.rect(self.screen, (38, 38, 44), pygame.Rect(enemy_x - 10, enemy_y - 15, 60, 6))
-                pygame.draw.rect(self.screen, self.enemy.color, pygame.Rect(enemy_x - 10, enemy_y - 15, int(60 * (self.enemy_hp / 100.0)), 6))
+                ratio = max(0.0, min(1.0, self.enemy_hp / max(1, max_hp)))
+                pygame.draw.rect(self.screen, self.enemy.color, pygame.Rect(enemy_x - 10, enemy_y - 15, int(60 * ratio), 6))
             
             # 2. Draw Bottom Combat Action Menu (Bottom 1/3: Y: 400 to 600)
             if not self.is_sliding and not self.is_combat_ending:
